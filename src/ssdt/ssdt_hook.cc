@@ -16,34 +16,20 @@ core::VoidResult SsdtHook::enable() {
         return core::ok();  // Already enabled
     }
 
-    // Hook function must be provided (either via manager.hook_by_* overload that
-    // took a fn, or via operator<< on the returned SsdtHook).
     if (!hook_fn_) {
         return core::err(core::ErrorCode::NullPointer);
     }
 
-    bool success = false;
-    if (type_ == HookType::Ssdt) {
-        // We already have the original, just swap in our hook
-        auto dispatch = klhk::get_dispatch_array();
-        if (dispatch) {
-            *dispatch[index_] = hook_fn_;
-            success = true;
-        }
-    } else {
-        const auto svc_count = klhk::get_ssdt_count();
-        const auto index_dispatch = (index_ - 0x1000) + svc_count;
-        auto dispatch = klhk::get_dispatch_array();
-        if (dispatch) {
-            *dispatch[index_dispatch] = hook_fn_;
-            success = true;
-        }
-    }
-
-    if (!success) {
+    // Install the hook via manager so we receive the routine that was
+    // previously in the dispatch table (this becomes this->original_ so
+    // get_original() returns the function we wrap).
+    void* prev = nullptr;
+    if (!manager_->do_hook(index_, hook_fn_, &prev, type_)) {
         return core::err(core::ErrorCode::HookFailed);
     }
 
+    // record the routine that was previously in the table
+    original_ = prev;
     enabled_ = true;
     return core::ok();
 }
@@ -57,25 +43,38 @@ core::VoidResult SsdtHook::disable() {
         return core::ok();  // Already disabled
     }
 
-    bool success = false;
-    if (type_ == HookType::Ssdt) {
-        auto dispatch = klhk::get_dispatch_array();
-        if (dispatch) {
-            *dispatch[index_] = original_;
-            success = true;
+    // Current dispatch (may or may not point to this hook) --- if this hook
+    // is the top-most (dispatch points to our hook_fn_), then restore the
+    // dispatch table to `original_`. If we're a middle hook, do not touch the
+    // dispatch table; instead, update downstream hooks so the chain remains
+    // consistent.
+    void* current = manager_->get_routine(index_, type_);
+
+    if (current == hook_fn_) {
+        // top-most hook: restore dispatch to the saved original
+        if (!manager_->do_unhook(index_, original_, type_)) {
+            return core::err(core::ErrorCode::UnhookFailed);
         }
     } else {
-        const auto svc_count = klhk::get_ssdt_count();
-        const auto index_dispatch = (index_ - 0x1000) + svc_count;
-        auto dispatch = klhk::get_dispatch_array();
-        if (dispatch) {
-            *dispatch[index_dispatch] = original_;
-            success = true;
-        }
-    }
+        // middle/unexposed hook: we must patch any hooks that relied on our
+        // function being in the chain so they now point to our `original_`.
+        for (size_t i = 0; i < kMaxHooks; ++i) {
+            if (&manager_->hooks_[i] == this)
+                continue;
 
-    if (!success) {
-        return core::err(core::ErrorCode::UnhookFailed);
+            SsdtHook& other = manager_->hooks_[i];
+            if (!other.valid_)
+                continue;
+            if (other.index_ != index_ || other.type_ != type_)
+                continue;
+
+            // If another hook's original_ pointed to our hook function,
+            // redirect it to our original_. This preserves the chain when a
+            // middle hook is removed.
+            if (other.original_ == hook_fn_) {
+                other.original_ = original_;
+            }
+        }
     }
 
     enabled_ = false;
@@ -164,26 +163,23 @@ core::Result<SsdtHook&> SsdtHookManager::hook_by_index(unsigned short index,
         }
     }
 
-    // Check if already hooked
-    if (is_hooked(index, type)) {
-        return core::err(core::ErrorCode::AlreadyHooked);
-    }
-
     // Find a free slot
     auto slot = find_free_slot();
     if (!slot) {
         return core::err(core::ErrorCode::OutOfRange);
     }
 
-    // Get the original function pointer
-    void* original = nullptr;
+    // Capture the routine currently in the dispatch table so get_original()
+    // for this hook returns the function we are wrapping (may be the real
+    // syscall or a previously-installed hook).
+    void* current = nullptr;
     if (type == HookType::Ssdt) {
-        original = klhk::get_ssdt_routine(index);
+        current = klhk::get_ssdt_routine(index);
     } else {
-        original = klhk::get_shadow_ssdt_routine(index);
+        current = klhk::get_shadow_ssdt_routine(index);
     }
 
-    if (!original) {
+    if (!current) {
         return core::err(core::ErrorCode::NotFound);
     }
 
@@ -192,7 +188,7 @@ core::Result<SsdtHook&> SsdtHookManager::hook_by_index(unsigned short index,
     slot->enabled_ = false;
     slot->index_ = index;
     slot->type_ = type;
-    slot->original_ = original;
+    slot->original_ = current;  // previous dispatch
     slot->hook_fn_ = hook_fn;
     slot->manager_ = this;
 
@@ -247,7 +243,8 @@ core::Result<SsdtHook&> SsdtHookManager::hook_by_syscall_name(
         return core::err(core::ErrorCode::InvalidSsdtIndex);
     }
 
-    const unsigned short index = static_cast<unsigned short>(syscall_result.value());
+    const unsigned short index =
+        static_cast<unsigned short>(syscall_result.value());
 
     if (!initialized_) {
         return core::err(core::ErrorCode::NotInitialized);
@@ -255,20 +252,12 @@ core::Result<SsdtHook&> SsdtHookManager::hook_by_syscall_name(
 
     // Check index validity
     if (type == HookType::Ssdt) {
-        if (index >= get_ssdt_count()) {
-            return core::err(core::ErrorCode::InvalidSsdtIndex);
-        }
+        ASSERT_TRUE_OR_ERR(index < get_ssdt_count(), InvalidSsdtIndex);
     } else {
         const auto shadow_count = get_shadow_ssdt_count();
         const auto adjusted_index = index - 0x1000;
-        if (!shadow_count || adjusted_index >= shadow_count) {
-            return core::err(core::ErrorCode::InvalidSsdtIndex);
-        }
-    }
-
-    // Check if already hooked
-    if (is_hooked(index, type)) {
-        return core::err(core::ErrorCode::AlreadyHooked);
+        ASSERT_TRUE_OR_ERR(shadow_count && adjusted_index < shadow_count,
+                           InvalidSsdtIndex);
     }
 
     auto slot = find_free_slot();
@@ -276,14 +265,14 @@ core::Result<SsdtHook&> SsdtHookManager::hook_by_syscall_name(
         return core::err(core::ErrorCode::OutOfRange);
     }
 
-    void* original = nullptr;
+    void* current = nullptr;
     if (type == HookType::Ssdt) {
-        original = klhk::get_ssdt_routine(index);
+        current = klhk::get_ssdt_routine(index);
     } else {
-        original = klhk::get_shadow_ssdt_routine(index);
+        current = klhk::get_shadow_ssdt_routine(index);
     }
 
-    if (!original) {
+    if (!current) {
         return core::err(core::ErrorCode::NotFound);
     }
 
@@ -292,7 +281,7 @@ core::Result<SsdtHook&> SsdtHookManager::hook_by_syscall_name(
     slot->enabled_ = false;
     slot->index_ = index;
     slot->type_ = type;
-    slot->original_ = original;
+    slot->original_ = current;  // previous dispatch
     slot->hook_fn_ = nullptr;
     slot->manager_ = this;
 
@@ -352,7 +341,8 @@ core::Result<SsdtHook&> SsdtHookManager::find_free_slot() {
     return core::err(core::ErrorCode::OutOfRange);
 }
 
-core::Result<SsdtHook&> SsdtHookManager::find_hook(unsigned short index, HookType type) {
+core::Result<SsdtHook&> SsdtHookManager::find_hook(unsigned short index,
+                                                   HookType type) {
     for (size_t i = 0; i < kMaxHooks; i++) {
         if (hooks_[i].valid_ && hooks_[i].index_ == index &&
             hooks_[i].type_ == type) {

@@ -6,7 +6,6 @@
 #include "ipc/protocol.hpp"
 #include "ssdt/ssdt.hpp"
 
-
 // Driver globals
 PDEVICE_OBJECT g_device_object = nullptr;
 UNICODE_STRING g_device_name = {};
@@ -175,52 +174,6 @@ EXTERN_C NTSTATUS DriverEntry(PDRIVER_OBJECT driver,
     if (!init_result) {
         log("Failed to initialize SSDT hook manager: %s",
             core::error_to_string(init_result.error()));
-        Cleanup();
-        return STATUS_UNSUCCESSFUL;
-    }
-
-    // Hook NtCreateFile to block a specific filename (ergonomic API)
-    auto hook_result =
-        manager.hook_by_syscall_name("NtCreateFile", ssdt::HookType::Ssdt);
-
-    if (!hook_result) {
-        log("Failed to create NtCreateFile hook: %s",
-            core::error_to_string(hook_result.error()));
-        Cleanup();
-        return STATUS_UNSUCCESSFUL;
-    }
-
-    static auto& create_file_hook = hook_result.value();
-    create_file_hook <<
-        [](PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
-           POBJECT_ATTRIBUTES ObjectAttributes, PIO_STATUS_BLOCK IoStatusBlock,
-           PLARGE_INTEGER AllocationSize, ULONG FileAttributes,
-           ULONG ShareAccess, ULONG CreateDisposition, ULONG CreateOptions,
-           PVOID EaBuffer, ULONG EaLength) -> NTSTATUS {
-        if (ObjectAttributes && ObjectAttributes->ObjectName &&
-            ObjectAttributes->ObjectName->Buffer) {
-            static const UNICODE_STRING kBlockedName =
-                RTL_CONSTANT_STRING(L"blook_test_hook_createfile.txt");
-
-            if (RtlSuffixUnicodeString(&kBlockedName,
-                                       ObjectAttributes->ObjectName, TRUE)) {
-                if (IoStatusBlock) {
-                    IoStatusBlock->Status = STATUS_ACCESS_DENIED;
-                    IoStatusBlock->Information = 0;
-                }
-                return STATUS_ACCESS_DENIED;
-            }
-        }
-
-        return create_file_hook.get_original<NtCreateFile>()(
-            FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock,
-            AllocationSize, FileAttributes, ShareAccess, CreateDisposition,
-            CreateOptions, EaBuffer, EaLength);
-    };
-
-    if (auto enable_result = create_file_hook.enable(); !enable_result) {
-        log("Failed to enable NtCreateFile hook: %s",
-            core::error_to_string(enable_result.error()));
         Cleanup();
         return STATUS_UNSUCCESSFUL;
     }

@@ -48,6 +48,7 @@ namespace hide {
 namespace globals {
 const wchar_t* wsProtectedProcesses[] = {
     L"cheatengine-x86_64.exe",
+    L"cheatengine-x86_64-SSE4-AVX2.exe",
     L"x64dbg.exe",
     L"windbg.exe",
     L"SystemInformer.exe",

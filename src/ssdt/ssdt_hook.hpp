@@ -11,6 +11,9 @@ namespace ssdt {
 // Maximum number of concurrent hooks supported
 constexpr size_t kMaxHooks = 64;
 
+// Maximum number of hooks allowed on the same SSDT entry (chain depth)
+constexpr size_t kMaxHooksPerEntry = 6;
+
 // Hook type enumeration
 enum class HookType {
     Ssdt,       // Regular SSDT
@@ -77,6 +80,10 @@ private:
 };
 
 // Manages SSDT hooks through Kaspersky's klhk.sys
+// Supports multiple hooks per SSDT entry (chained): each new hook's
+// get_original() will point at the routine that was previously in the
+// dispatch table (the immediately-previous hook or real syscall).
+// Maximum concurrent hooks per-entry is defined by `kMaxHooksPerEntry`.
 // Singleton-style manager that handles all hook operations
 class SsdtHookManager {
     friend class SsdtHook;
