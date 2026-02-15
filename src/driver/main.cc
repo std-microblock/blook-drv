@@ -5,82 +5,19 @@
 #include "ipc/protocol.hpp"
 #include "ssdt/ssdt.hpp"
 
-
-//
 // Driver globals
-//
 PDEVICE_OBJECT g_device_object = nullptr;
 UNICODE_STRING g_device_name = {};
 UNICODE_STRING g_symbolic_link = {};
 bool g_symbolic_link_created = false;
 
-//
-// Hook globals
-//
-using NtCreateFile_t = NTSTATUS (*)(
-    PHANDLE FileHandle,
-    ACCESS_MASK DesiredAccess,
-    POBJECT_ATTRIBUTES ObjectAttributes,
-    PIO_STATUS_BLOCK IoStatusBlock,
-    PLARGE_INTEGER AllocationSize,
-    ULONG FileAttributes,
-    ULONG ShareAccess,
-    ULONG CreateDisposition,
-    ULONG CreateOptions,
-    PVOID EaBuffer,
-    ULONG EaLength);
-
-ssdt::SsdtHook* g_create_file_hook = nullptr;
-NtCreateFile_t g_original_create_file = nullptr;
-
-//
-// Hook routine
-//
-EXTERN_C NTSTATUS HookNtCreateFile(
-    PHANDLE FileHandle,
-    ACCESS_MASK DesiredAccess,
-    POBJECT_ATTRIBUTES ObjectAttributes,
-    PIO_STATUS_BLOCK IoStatusBlock,
-    PLARGE_INTEGER AllocationSize,
-    ULONG FileAttributes,
-    ULONG ShareAccess,
-    ULONG CreateDisposition,
-    ULONG CreateOptions,
-    PVOID EaBuffer,
-    ULONG EaLength) {
-
-    if (ObjectAttributes && ObjectAttributes->ObjectName &&
-        ObjectAttributes->ObjectName->Buffer) {
-        static const UNICODE_STRING kBlockedName =
-            RTL_CONSTANT_STRING(L"blook_test_hook_createfile.txt");
-
-        if (RtlSuffixUnicodeString(&kBlockedName, ObjectAttributes->ObjectName,
-                                   TRUE)) {
-            if (IoStatusBlock) {
-                IoStatusBlock->Status = STATUS_ACCESS_DENIED;
-                IoStatusBlock->Information = 0;
-            }
-            return STATUS_ACCESS_DENIED;
-        }
-    }
-
-    return g_original_create_file(FileHandle, DesiredAccess, ObjectAttributes,
-                                  IoStatusBlock, AllocationSize, FileAttributes,
-                                  ShareAccess, CreateDisposition, CreateOptions,
-                                  EaBuffer, EaLength);
-}
-
-//
 // Forward declarations
-//
 DRIVER_UNLOAD DriverUnload;
 DRIVER_DISPATCH DispatchCreate;
 DRIVER_DISPATCH DispatchClose;
 DRIVER_DISPATCH DispatchDeviceControl;
 
-//
 // IPC dispatch handlers
-//
 NTSTATUS HandlePing(PIRP irp, PIO_STACK_LOCATION stack) {
     UNREFERENCED_PARAMETER(stack);
 
@@ -111,9 +48,7 @@ NTSTATUS HandleGetVersion(PIRP irp, PIO_STACK_LOCATION stack) {
     return STATUS_SUCCESS;
 }
 
-//
 // Dispatch routines
-//
 NTSTATUS DispatchCreate(PDEVICE_OBJECT device, PIRP irp) {
     UNREFERENCED_PARAMETER(device);
 
@@ -160,18 +95,13 @@ NTSTATUS DispatchDeviceControl(PDEVICE_OBJECT device, PIRP irp) {
     return status;
 }
 
-//
 // Cleanup routine
-//
 void Cleanup() {
     // Unhook all SSDT hooks
     auto& manager = ssdt::SsdtHookManager::instance();
     if (manager.is_initialized()) {
         manager.unhook_all();
     }
-
-    g_create_file_hook = nullptr;
-    g_original_create_file = nullptr;
 
     // Free cached syscall images
     core::unload_syscall_images();
@@ -189,9 +119,7 @@ void Cleanup() {
     }
 }
 
-//
 // Driver unload
-//
 void DriverUnload(PDRIVER_OBJECT driver) {
     UNREFERENCED_PARAMETER(driver);
 
@@ -200,9 +128,7 @@ void DriverUnload(PDRIVER_OBJECT driver) {
     log("Driver unloaded.");
 }
 
-//
 // Driver entry
-//
 EXTERN_C NTSTATUS DriverEntry(PDRIVER_OBJECT driver,
                               PUNICODE_STRING registry_path) {
     UNREFERENCED_PARAMETER(registry_path);
@@ -251,10 +177,9 @@ EXTERN_C NTSTATUS DriverEntry(PDRIVER_OBJECT driver,
         return STATUS_UNSUCCESSFUL;
     }
 
-    // Hook NtCreateFile to block a specific filename
-    auto hook_result = manager.hook_by_syscall_name(
-        "NtCreateFile", reinterpret_cast<void*>(&HookNtCreateFile),
-        ssdt::HookType::Ssdt);
+    // Hook NtCreateFile to block a specific filename (ergonomic API)
+    auto hook_result =
+        manager.hook_by_syscall_name("NtCreateFile", ssdt::HookType::Ssdt);
 
     if (!hook_result) {
         log("Failed to create NtCreateFile hook: %s",
@@ -263,18 +188,35 @@ EXTERN_C NTSTATUS DriverEntry(PDRIVER_OBJECT driver,
         return STATUS_UNSUCCESSFUL;
     }
 
-    g_create_file_hook = hook_result.value();
-    g_original_create_file =
-        g_create_file_hook->get_original<NtCreateFile_t>();
+    static auto& create_file_hook = hook_result.value();
+    create_file_hook <<
+        [](PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
+           POBJECT_ATTRIBUTES ObjectAttributes, PIO_STATUS_BLOCK IoStatusBlock,
+           PLARGE_INTEGER AllocationSize, ULONG FileAttributes,
+           ULONG ShareAccess, ULONG CreateDisposition, ULONG CreateOptions,
+           PVOID EaBuffer, ULONG EaLength) -> NTSTATUS {
+        if (ObjectAttributes && ObjectAttributes->ObjectName &&
+            ObjectAttributes->ObjectName->Buffer) {
+            static const UNICODE_STRING kBlockedName =
+                RTL_CONSTANT_STRING(L"blook_test_hook_createfile.txt");
 
-    if (!g_original_create_file) {
-        log("Failed to resolve original NtCreateFile");
-        Cleanup();
-        return STATUS_UNSUCCESSFUL;
-    }
+            if (RtlSuffixUnicodeString(&kBlockedName,
+                                       ObjectAttributes->ObjectName, TRUE)) {
+                if (IoStatusBlock) {
+                    IoStatusBlock->Status = STATUS_ACCESS_DENIED;
+                    IoStatusBlock->Information = 0;
+                }
+                return STATUS_ACCESS_DENIED;
+            }
+        }
 
-    auto enable_result = g_create_file_hook->enable();
-    if (!enable_result) {
+        return create_file_hook.get_original<NtCreateFile>()(
+            FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock,
+            AllocationSize, FileAttributes, ShareAccess, CreateDisposition,
+            CreateOptions, EaBuffer, EaLength);
+    };
+
+    if (auto enable_result = create_file_hook.enable(); !enable_result) {
         log("Failed to enable NtCreateFile hook: %s",
             core::error_to_string(enable_result.error()));
         Cleanup();

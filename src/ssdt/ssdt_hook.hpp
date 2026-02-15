@@ -4,31 +4,24 @@
 #include <windef.h>
 
 #include "core/core.hpp"
+#include "core/expected.hpp"
 
 namespace ssdt {
 
-//
 // Maximum number of concurrent hooks supported
-//
 constexpr size_t kMaxHooks = 64;
 
-//
 // Hook type enumeration
-//
 enum class HookType {
     Ssdt,       // Regular SSDT
     ShadowSsdt  // Shadow SSDT (win32k)
 };
 
-//
 // Forward declaration
-//
 class SsdtHookManager;
 
-//
 // Represents a single SSDT hook
 // Provides methods to enable/disable the hook and call the original function
-//
 class SsdtHook {
     friend class SsdtHookManager;
 
@@ -58,6 +51,20 @@ public:
     [[nodiscard]] T get_original() const {
         return reinterpret_cast<T>(original_);
     }
+
+    template <auto Fn>
+    [[nodiscard]] auto get_original() const {
+        return reinterpret_cast<decltype(Fn)>(original_);
+    }
+
+    // Assign a non-capturing lambda / function pointer as the hook implementation.
+    // Example: hook << [](Args...){ /* ... */ };
+    template <typename Fn>
+    SsdtHook& operator<<(Fn fn) {
+        // requires non-capturing lambda or function pointer (convertible to function pointer)
+        hook_fn_ = reinterpret_cast<void*>(+fn);
+        return *this;
+    }
     
 private:
     bool valid_ = false;
@@ -69,10 +76,8 @@ private:
     SsdtHookManager* manager_ = nullptr;
 };
 
-//
 // Manages SSDT hooks through Kaspersky's klhk.sys
 // Singleton-style manager that handles all hook operations
-//
 class SsdtHookManager {
     friend class SsdtHook;
 
@@ -92,20 +97,25 @@ public:
     // Get Shadow SSDT service count
     [[nodiscard]] unsigned int get_shadow_ssdt_count() const;
     
-    //
-    // Hook installation methods
-    //
-    
+        // Hook installation methods
+        
     // Hook by index (returns a disabled hook that must be enabled)
-    [[nodiscard]] core::Result<SsdtHook*> hook_by_index(
+    [[nodiscard]] core::Result<SsdtHook&> hook_by_index(
         unsigned short index,
         void* hook_fn,
         HookType type = HookType::Ssdt);
 
     // Hook by syscall name (returns a disabled hook that must be enabled)
-    [[nodiscard]] core::Result<SsdtHook*> hook_by_syscall_name(
+    [[nodiscard]] core::Result<SsdtHook&> hook_by_syscall_name(
         const char* syscall_name,
         void* hook_fn,
+        HookType type = HookType::Ssdt);
+
+    // Hook by syscall name (returns a disabled hook *without* a hook fn set).
+    // Use `hook_obj << [](...) { ... };` to assign the handler, then call
+    // `hook_obj->enable()`.
+    [[nodiscard]] core::Result<SsdtHook&> hook_by_syscall_name(
+        const char* syscall_name,
         HookType type = HookType::Ssdt);
     
     // Check if an index is already hooked
@@ -130,10 +140,10 @@ private:
     [[nodiscard]] bool do_unhook(unsigned short index, void* original, HookType type);
     
     // Find a free hook slot
-    [[nodiscard]] SsdtHook* find_free_slot();
+    [[nodiscard]] core::Result<SsdtHook&> find_free_slot();
     
     // Find hook by index
-    [[nodiscard]] SsdtHook* find_hook(unsigned short index, HookType type);
+    [[nodiscard]] core::Result<SsdtHook&> find_hook(unsigned short index, HookType type);
     
     bool initialized_ = false;
     SsdtHook hooks_[kMaxHooks] = {};

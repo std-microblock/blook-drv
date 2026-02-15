@@ -1,15 +1,11 @@
 #pragma once
 
-//
 // Core utilities for kernel mode driver
 // No dynamic memory allocation - all stack/static based
-//
 
 namespace core {
 
-//
 // Error codes for expected<T, E> style error handling
-//
 enum class ErrorCode {
     Success = 0,
     
@@ -44,9 +40,7 @@ enum class ErrorCode {
     ServiceDeleteFailed,
 };
 
-//
 // Get error description
-//
 inline const char* error_to_string(ErrorCode code) {
     switch (code) {
         case ErrorCode::Success: return "Success";

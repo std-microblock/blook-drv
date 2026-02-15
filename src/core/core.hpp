@@ -1,8 +1,6 @@
 #pragma once
 
-//
 // Core module - utilities for kernel mode without STL
-//
 
 #include "error.hpp"
 #include "expected.hpp"
@@ -10,9 +8,7 @@
 #include "syscall.hpp"
 #include "utils.hpp"
 
-//
 // Logging macro
-//
 
 #define log(format, ...)                                                  \
     DbgPrintEx(                                                           \

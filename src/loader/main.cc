@@ -4,9 +4,7 @@
 
 #include "ipc/protocol.hpp"
 
-//
 // Service and driver management
-//
 class DriverService {
 public:
     DriverService(const wchar_t* service_name, const wchar_t* driver_path)
@@ -122,9 +120,7 @@ private:
     SC_HANDLE service_;
 };
 
-//
 // IPC Client
-//
 class IpcClient {
 public:
     IpcClient() : device_(INVALID_HANDLE_VALUE) {}
@@ -226,9 +222,7 @@ private:
     HANDLE device_;
 };
 
-//
 // Get driver path relative to executable
-//
 std::wstring get_driver_path() {
     wchar_t exe_path[MAX_PATH];
     GetModuleFileNameW(nullptr, exe_path, MAX_PATH);

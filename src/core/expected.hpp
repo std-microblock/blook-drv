@@ -118,9 +118,7 @@ class expected {
     };
 };
 
-//
 // Specialization for void
-//
 template <typename E>
 class expected<void, E> {
    public:
@@ -142,17 +140,40 @@ class expected<void, E> {
     E error_;
 };
 
-//
+template <typename T, typename E>
+class expected<T&, E> {
+public:
+    constexpr expected(T& val) : has_val_(true), val_ptr_(&val) {}
+    
+    constexpr expected(const unexpected<E>& err) 
+        : has_val_(false), error_(err.error) {}
+    constexpr expected(unexpected<E>&& err) 
+        : has_val_(false), error_(static_cast<E&&>(err.error)) {}
+
+    [[nodiscard]] constexpr bool has_value() const { return has_val_; }
+    [[nodiscard]] constexpr explicit operator bool() const { return has_val_; }
+
+    [[nodiscard]] constexpr T* operator->() const { return val_ptr_; }
+    [[nodiscard]] constexpr T& operator*() const { return *val_ptr_; }
+    [[nodiscard]] constexpr T& value() const { return *val_ptr_; }
+
+    [[nodiscard]] constexpr const E& error() const { return error_; }
+
+private:
+    bool has_val_;
+    union {
+        T* val_ptr_;
+        E error_;
+    };
+};
+
 // Helper type aliases using ErrorCode
-//
 template <typename T>
 using Result = expected<T, ErrorCode>;
 
 using VoidResult = expected<void, ErrorCode>;
 
-//
 // Helper function to create success result
-//
 inline VoidResult ok() {
     return VoidResult{};
 }
@@ -162,9 +183,7 @@ Result<T> ok(T&& value) {
     return Result<T>{static_cast<T&&>(value)};
 }
 
-//
 // Helper function to create error result
-//
 inline unexpected<ErrorCode> err(ErrorCode code) {
     return unexpected<ErrorCode>{code};
 }

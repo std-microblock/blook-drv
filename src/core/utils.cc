@@ -3,9 +3,7 @@
 
 namespace core {
 
-//
 // Helper: convert hex char to byte
-//
 static unsigned char hex_char_to_byte(char c) {
     if (c >= '0' && c <= '9') return c - '0';
     if (c >= 'A' && c <= 'F') return c - 'A' + 10;
@@ -13,10 +11,8 @@ static unsigned char hex_char_to_byte(char c) {
     return 0;
 }
 
-//
 // Helper: parse hex pattern string into bytes and wildcards
 // Returns false if pattern is invalid
-//
 static bool parse_hex_pattern(const char* hex_pattern, unsigned char* bytes, bool* wildcards, size_t* out_len) {
     size_t len = 0;
     const char* p = hex_pattern;
@@ -53,9 +49,7 @@ static bool parse_hex_pattern(const char* hex_pattern, unsigned char* bytes, boo
     return len > 0;
 }
 
-//
 // Pattern matching implementation
-//
 uintptr_t find_pattern(uintptr_t base, size_t size, const char* hex_pattern) {
     if (!base || !size || !hex_pattern) {
         return 0;
