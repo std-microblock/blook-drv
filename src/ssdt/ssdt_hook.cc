@@ -8,25 +8,19 @@ namespace ssdt {
 // SsdtHook implementation
 
 core::VoidResult SsdtHook::enable() {
-    if (!valid_) {
-        return core::err(core::ErrorCode::NotInitialized);
-    }
+    ASSERT_TRUE(valid_, NotInitialized);
 
     if (enabled_) {
         return core::ok();  // Already enabled
     }
 
-    if (!hook_fn_) {
-        return core::err(core::ErrorCode::NullPointer);
-    }
+    ASSERT_TRUE(hook_fn_, NullPointer);
 
     // Install the hook via manager so we receive the routine that was
     // previously in the dispatch table (this becomes this->original_ so
     // get_original() returns the function we wrap).
     void* prev = nullptr;
-    if (!manager_->do_hook(index_, hook_fn_, &prev, type_)) {
-        return core::err(core::ErrorCode::HookFailed);
-    }
+    ASSERT_TRUE(manager_->do_hook(index_, hook_fn_, &prev, type_), HookFailed);
 
     // record the routine that was previously in the table
     original_ = prev;
@@ -35,9 +29,7 @@ core::VoidResult SsdtHook::enable() {
 }
 
 core::VoidResult SsdtHook::disable() {
-    if (!valid_) {
-        return core::err(core::ErrorCode::NotInitialized);
-    }
+    ASSERT_TRUE(valid_, NotInitialized);
 
     if (!enabled_) {
         return core::ok();  // Already disabled
@@ -52,9 +44,7 @@ core::VoidResult SsdtHook::disable() {
 
     if (current == hook_fn_) {
         // top-most hook: restore dispatch to the saved original
-        if (!manager_->do_unhook(index_, original_, type_)) {
-            return core::err(core::ErrorCode::UnhookFailed);
-        }
+        ASSERT_TRUE(manager_->do_unhook(index_, original_, type_), UnhookFailed);
     } else {
         // middle/unexposed hook: we must patch any hooks that relied on our
         // function being in the chain so they now point to our `original_`.
@@ -108,9 +98,7 @@ core::VoidResult SsdtHookManager::initialize() {
     }
 
     // Initialize utils first
-    if (!core::init()) {
-        return core::err(core::ErrorCode::NotInitialized);
-    }
+    ASSERT_TRUE(core::init(), NotInitialized);
 
     // Initialize klhk interface
     auto result = klhk::initialize();
@@ -124,8 +112,8 @@ core::VoidResult SsdtHookManager::initialize() {
         return core::err(hvm_result.error());
     }
 
-    ASSERT_TRUE_OR_ERR(hvm_result, HvmInitFailed);
-    ASSERT_TRUE_OR_ERR(hvm_result.value() == 0, HvmInitFailed);
+    ASSERT_TRUE(hvm_result, HvmInitFailed);
+    ASSERT_TRUE(hvm_result.value() == 0, HvmInitFailed);
 
     initialized_ = true;
     return core::ok();
@@ -142,32 +130,22 @@ unsigned int SsdtHookManager::get_shadow_ssdt_count() const {
 core::Result<SsdtHook&> SsdtHookManager::hook_by_index(unsigned short index,
                                                        void* hook_fn,
                                                        HookType type) {
-    if (!initialized_) {
-        return core::err(core::ErrorCode::NotInitialized);
-    }
+    ASSERT_TRUE(initialized_, NotInitialized);
 
-    if (!hook_fn) {
-        return core::err(core::ErrorCode::NullPointer);
-    }
+    ASSERT_TRUE(hook_fn, NullPointer);
 
     // Check index validity
     if (type == HookType::Ssdt) {
-        if (index >= get_ssdt_count()) {
-            return core::err(core::ErrorCode::InvalidSsdtIndex);
-        }
+        ASSERT_TRUE(index < get_ssdt_count(), InvalidSsdtIndex);
     } else {
         const auto shadow_count = get_shadow_ssdt_count();
         const auto adjusted_index = index - 0x1000;
-        if (!shadow_count || adjusted_index >= shadow_count) {
-            return core::err(core::ErrorCode::InvalidSsdtIndex);
-        }
+        ASSERT_TRUE(shadow_count && adjusted_index < shadow_count, InvalidSsdtIndex);
     }
 
     // Find a free slot
     auto slot = find_free_slot();
-    if (!slot) {
-        return core::err(core::ErrorCode::OutOfRange);
-    }
+    ASSERT_TRUE(slot, OutOfRange);
 
     // Capture the routine currently in the dispatch table so get_original()
     // for this hook returns the function we are wrapping (may be the real
@@ -179,9 +157,7 @@ core::Result<SsdtHook&> SsdtHookManager::hook_by_index(unsigned short index,
         current = klhk::get_shadow_ssdt_routine(index);
     }
 
-    if (!current) {
-        return core::err(core::ErrorCode::NotFound);
-    }
+    ASSERT_TRUE(current, NotFound);
 
     // Setup the hook (but don't enable it yet)
     slot->valid_ = true;
@@ -199,9 +175,7 @@ core::Result<SsdtHook&> SsdtHookManager::hook_by_index(unsigned short index,
 
 core::Result<SsdtHook&> SsdtHookManager::hook_by_syscall_name(
     const char* syscall_name, void* hook_fn, HookType type) {
-    if (!syscall_name) {
-        return core::err(core::ErrorCode::InvalidArgument);
-    }
+    ASSERT_TRUE(syscall_name, InvalidArgument);
 
     auto syscall_result = [&]() {
         if (type == HookType::ShadowSsdt)
@@ -213,9 +187,7 @@ core::Result<SsdtHook&> SsdtHookManager::hook_by_syscall_name(
         return core::err(syscall_result.error());
     }
 
-    if (syscall_result.value() > 0xFFFF) {
-        return core::err(core::ErrorCode::InvalidSsdtIndex);
-    }
+    ASSERT_TRUE(syscall_result.value() <= 0xFFFF, InvalidSsdtIndex);
 
     return hook_by_index(static_cast<unsigned short>(syscall_result.value()),
                          hook_fn, type);
@@ -225,9 +197,7 @@ core::Result<SsdtHook&> SsdtHookManager::hook_by_syscall_name(
 // Caller is expected to assign implementation (operator<<) before enabling.
 core::Result<SsdtHook&> SsdtHookManager::hook_by_syscall_name(
     const char* syscall_name, HookType type) {
-    if (!syscall_name) {
-        return core::err(core::ErrorCode::InvalidArgument);
-    }
+    ASSERT_TRUE(syscall_name, InvalidArgument);
 
     auto syscall_result = [&]() {
         if (type == HookType::ShadowSsdt)
@@ -239,31 +209,25 @@ core::Result<SsdtHook&> SsdtHookManager::hook_by_syscall_name(
         return core::err(syscall_result.error());
     }
 
-    if (syscall_result.value() > 0xFFFF) {
-        return core::err(core::ErrorCode::InvalidSsdtIndex);
-    }
+    ASSERT_TRUE(syscall_result.value() <= 0xFFFF, InvalidSsdtIndex);
 
     const unsigned short index =
         static_cast<unsigned short>(syscall_result.value());
 
-    if (!initialized_) {
-        return core::err(core::ErrorCode::NotInitialized);
-    }
+    ASSERT_TRUE(initialized_, NotInitialized);
 
     // Check index validity
     if (type == HookType::Ssdt) {
-        ASSERT_TRUE_OR_ERR(index < get_ssdt_count(), InvalidSsdtIndex);
+        ASSERT_TRUE(index < get_ssdt_count(), InvalidSsdtIndex);
     } else {
         const auto shadow_count = get_shadow_ssdt_count();
         const auto adjusted_index = index - 0x1000;
-        ASSERT_TRUE_OR_ERR(shadow_count && adjusted_index < shadow_count,
+        ASSERT_TRUE(shadow_count && adjusted_index < shadow_count,
                            InvalidSsdtIndex);
     }
 
     auto slot = find_free_slot();
-    if (!slot) {
-        return core::err(core::ErrorCode::OutOfRange);
-    }
+    ASSERT_TRUE(slot, OutOfRange);
 
     void* current = nullptr;
     if (type == HookType::Ssdt) {
@@ -272,9 +236,7 @@ core::Result<SsdtHook&> SsdtHookManager::hook_by_syscall_name(
         current = klhk::get_shadow_ssdt_routine(index);
     }
 
-    if (!current) {
-        return core::err(core::ErrorCode::NotFound);
-    }
+    ASSERT_TRUE(current, NotFound);
 
     // Setup the hook slot without a hook_fn_ yet
     slot->valid_ = true;

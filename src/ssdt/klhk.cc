@@ -29,21 +29,19 @@ core::VoidResult ssdt::klhk::initialize() {
         return core::ok();
     }
 
-    if (!is_loaded()) {
-        return core::err(core::ErrorCode::KlhkNotLoaded);
-    }
+    ASSERT_TRUE(is_loaded(), KlhkNotLoaded);
 
     // Find klhk's hvm thread object
     auto presult =
         core::find_pattern_km(L"klhk.sys", ".text", "48392D????????89");
 
-    ASSERT_TRUE_OR_ERR(presult, KlhkInitFailed);
+    ASSERT_TRUE(presult, KlhkInitFailed);
 
     g_hvm_thread_object = reinterpret_cast<PETHREAD*>(
         presult + *reinterpret_cast<int*>(presult + 0x3) + 0x7);
 
     presult = core::find_pattern_km(L"klhk.sys", ".text", "83c904890d????????");
-    ASSERT_TRUE_OR_ERR(presult, KlhkInitFailed);
+    ASSERT_TRUE(presult, KlhkInitFailed);
 
     int hvm_init_flag = *reinterpret_cast<PLONG>(
         presult + 3 + 6 + *reinterpret_cast<uint32_t*>(presult + 3 + 2));
@@ -54,7 +52,7 @@ core::VoidResult ssdt::klhk::initialize() {
     presult =
         core::find_pattern_km(L"klhk.sys", ".text", "F0FF05????????488D0D");
 
-    ASSERT_TRUE_OR_ERR(presult, KlhkInitFailed);
+    ASSERT_TRUE(presult, KlhkInitFailed);
 
     g_hvm_run_requests = reinterpret_cast<PLONG>(
         presult + *reinterpret_cast<int*>(presult + 0x3) + 0x7);
@@ -68,7 +66,7 @@ core::VoidResult ssdt::klhk::initialize() {
     presult =
         core::find_pattern_km(L"klhk.sys", ".text", "488D05????????498973");
 
-    ASSERT_TRUE_OR_ERR(presult, KlhkInitFailed);
+    ASSERT_TRUE(presult, KlhkInitFailed);
 
     g_hvm_sync_event = reinterpret_cast<PRKEVENT>(
         presult + *reinterpret_cast<int*>(presult + 0x3) + 0x7);
@@ -76,7 +74,7 @@ core::VoidResult ssdt::klhk::initialize() {
     // Find klhk's hvm status
     presult = core::find_pattern_km(L"klhk.sys", ".text", "8B1D????????89");
 
-    ASSERT_TRUE_OR_ERR(presult, KlhkInitFailed);
+    ASSERT_TRUE(presult, KlhkInitFailed);
 
     g_hvm_status = reinterpret_cast<PNTSTATUS>(
         presult + *reinterpret_cast<int*>(presult + 0x2) + 0x6);
@@ -85,7 +83,7 @@ core::VoidResult ssdt::klhk::initialize() {
     presult =
         core::find_pattern_km(L"klhk.sys", "_hvmcode", "4C8D0D????????4D");
 
-    ASSERT_TRUE_OR_ERR(presult, KlhkInitFailed);
+    ASSERT_TRUE(presult, KlhkInitFailed);
 
     g_system_dispatch_array = reinterpret_cast<void***>(
         presult + *reinterpret_cast<int*>(presult + 0x3) + 0x7);
@@ -93,7 +91,7 @@ core::VoidResult ssdt::klhk::initialize() {
     // Find number of services (SSDT)
     presult = core::find_pattern_km(L"klhk.sys", ".text", "890D????????8BD3");
 
-    ASSERT_TRUE_OR_ERR(presult, KlhkInitFailed);
+    ASSERT_TRUE(presult, KlhkInitFailed);
 
     g_ssdt_service_count = reinterpret_cast<unsigned int*>(
         presult + *reinterpret_cast<int*>(presult + 0x2) + 0x6);
@@ -101,7 +99,7 @@ core::VoidResult ssdt::klhk::initialize() {
     // Find number of services (Shadow SSDT)
     presult = core::find_pattern_km(L"klhk.sys", ".text", "8905????????85C0");
 
-    ASSERT_TRUE_OR_ERR(presult, KlhkInitFailed);
+    ASSERT_TRUE(presult, KlhkInitFailed);
 
     g_shadow_ssdt_service_count = reinterpret_cast<unsigned int*>(
         presult + *reinterpret_cast<int*>(presult + 0x2) + 0x6);
@@ -109,7 +107,7 @@ core::VoidResult ssdt::klhk::initialize() {
     // Find provider data
     presult = core::find_pattern_km(L"klhk.sys", ".text", "391D????????75");
 
-    ASSERT_TRUE_OR_ERR(presult, KlhkInitFailed);
+    ASSERT_TRUE(presult, KlhkInitFailed);
 
     g_provider = reinterpret_cast<unsigned int*>(
         presult + *reinterpret_cast<int*>(presult + 2) + 0x6);
@@ -119,17 +117,15 @@ core::VoidResult ssdt::klhk::initialize() {
 }
 
 core::Result<NTSTATUS> ssdt::klhk::hvm_init() {
-    if (!g_initialized) {
-        return core::err(core::ErrorCode::NotInitialized);
-    }
+    ASSERT_TRUE(g_initialized, NotInitialized);
 
-    ASSERT_TRUE_OR_ERR(g_hvm_thread_object && *g_hvm_thread_object,
+    ASSERT_TRUE(g_hvm_thread_object && *g_hvm_thread_object,
                        HvmInitFailed);
-    ASSERT_TRUE_OR_ERR(g_hvm_run_requests, HvmInitFailed);
-    ASSERT_TRUE_OR_ERR(g_hvm_notification_event, HvmInitFailed);
-    ASSERT_TRUE_OR_ERR(g_hvm_sync_event, HvmInitFailed);
-    ASSERT_TRUE_OR_ERR(g_hvm_status, HvmInitFailed);
-    ASSERT_TRUE_OR_ERR(g_provider, HvmInitFailed);
+    ASSERT_TRUE(g_hvm_run_requests, HvmInitFailed);
+    ASSERT_TRUE(g_hvm_notification_event, HvmInitFailed);
+    ASSERT_TRUE(g_hvm_sync_event, HvmInitFailed);
+    ASSERT_TRUE(g_hvm_status, HvmInitFailed);
+    ASSERT_TRUE(g_provider, HvmInitFailed);
 
     // Set provider to random value
     *g_provider = 4;

@@ -354,7 +354,7 @@ core::VoidResult register_hooks() {
 
     // NtOpenProcess
     auto result_open = manager.hook_by_syscall_name("NtOpenProcess");
-    ASSERT_TRUE_OR_ERR(result_open, NotFound);
+    ASSERT_TRUE(result_open, NotFound);
     static auto& open_hook = result_open.value();
     open_hook << [](PHANDLE ProcessHandle, ACCESS_MASK DesiredAccess,
                     POBJECT_ATTRIBUTES ObjectAttributes,
@@ -412,12 +412,12 @@ core::VoidResult register_hooks() {
             return status;
         }
     };
-    ASSERT_TRUE_OR_ERR(open_hook.enable(), HookFailed);
+    ASSERT_TRUE(open_hook.enable(), HookFailed);
 
     // NtQuerySystemInformation
     auto result_query =
         manager.hook_by_syscall_name("NtQuerySystemInformation");
-    ASSERT_TRUE_OR_ERR(result_query, NotFound);
+    ASSERT_TRUE(result_query, NotFound);
     static auto& query_hook = result_query.value();
     query_hook << [](SYSTEM_INFORMATION_CLASS SystemInformationClass,
                      PVOID Buffer, ULONG Length,
@@ -484,11 +484,11 @@ core::VoidResult register_hooks() {
         }
         return status;
     };
-    ASSERT_TRUE_OR_ERR(query_hook.enable(), HookFailed);
+    ASSERT_TRUE(query_hook.enable(), HookFailed);
 
     // NtWriteVirtualMemory
     auto result_write = manager.hook_by_syscall_name("NtWriteVirtualMemory");
-    ASSERT_TRUE_OR_ERR(result_write, NotFound);
+    ASSERT_TRUE(result_write, NotFound);
     static auto& write_hook = result_write.value();
     write_hook << [](HANDLE ProcessHandle, PVOID BaseAddress, PVOID Buffer,
                      SIZE_T NumberOfBytesToWrite,
@@ -528,11 +528,11 @@ core::VoidResult register_hooks() {
         }
         return res;
     };
-    ASSERT_TRUE_OR_ERR(write_hook.enable(), HookFailed);
+    ASSERT_TRUE(write_hook.enable(), HookFailed);
 
     // NtAllocateVirtualMemory
     auto result_alloc = manager.hook_by_syscall_name("NtAllocateVirtualMemory");
-    ASSERT_TRUE_OR_ERR(result_alloc, NotFound);
+    ASSERT_TRUE(result_alloc, NotFound);
     static auto& alloc_hook = result_alloc.value();
     alloc_hook << [](HANDLE ProcessHandle, PVOID* BaseAddress,
                      ULONG_PTR ZeroBits, PSIZE_T RegionSize,
@@ -574,11 +574,11 @@ core::VoidResult register_hooks() {
         }
         return res;
     };
-    ASSERT_TRUE_OR_ERR(alloc_hook.enable(), HookFailed);
+    ASSERT_TRUE(alloc_hook.enable(), HookFailed);
 
     // NtFreeVirtualMemory
     auto result_free = manager.hook_by_syscall_name("NtFreeVirtualMemory");
-    ASSERT_TRUE_OR_ERR(result_free, NotFound);
+    ASSERT_TRUE(result_free, NotFound);
     static auto& free_hook = result_free.value();
     free_hook << [](HANDLE ProcessHandle, PVOID* BaseAddress,
                     PSIZE_T RegionSize, ULONG FreeType) -> NTSTATUS {
@@ -620,11 +620,11 @@ core::VoidResult register_hooks() {
         }
         return res;
     };
-    ASSERT_TRUE_OR_ERR(free_hook.enable(), HookFailed);
+    ASSERT_TRUE(free_hook.enable(), HookFailed);
 
     // NtLoadDriver - allow filtering if needed
     auto result_load = manager.hook_by_syscall_name("NtLoadDriver");
-    ASSERT_TRUE_OR_ERR(result_load, NotFound);
+    ASSERT_TRUE(result_load, NotFound);
     static auto& load_hook = result_load.value();
     load_hook << [](PUNICODE_STRING DriverServiceName) -> NTSTATUS {
         bool bLoad = true;
@@ -644,12 +644,12 @@ core::VoidResult register_hooks() {
                 DriverServiceName ? DriverServiceName->Buffer : L"(null)");
         return ret;
     };
-    ASSERT_TRUE_OR_ERR(load_hook.enable(), HookFailed);
+    ASSERT_TRUE(load_hook.enable(), HookFailed);
 
     // Shadow-SSDT (win32k) hooks for window enumeration / foreground handling
     auto result_win_from_point = manager.hook_by_syscall_name(
         "NtUserWindowFromPoint", ssdt::HookType::ShadowSsdt);
-    ASSERT_TRUE_OR_ERR(result_win_from_point, NotFound);
+    ASSERT_TRUE(result_win_from_point, NotFound);
     static auto& winfp_hook = result_win_from_point.value();
     winfp_hook << [](POINT p) -> HWND {
         auto original = winfp_hook.get_original<NtUserWindowFromPoint>();
@@ -661,11 +661,11 @@ core::VoidResult register_hooks() {
             return res;
         return 0;
     };
-    ASSERT_TRUE_OR_ERR(winfp_hook.enable(), HookFailed);
+    ASSERT_TRUE(winfp_hook.enable(), HookFailed);
 
     auto result_qwindow = manager.hook_by_syscall_name(
         "NtUserQueryWindow", ssdt::HookType::ShadowSsdt);
-    ASSERT_TRUE_OR_ERR(result_qwindow, HookFailed);
+    ASSERT_TRUE(result_qwindow, HookFailed);
 
     static auto& qwin_hook = result_qwindow.value();
     qwin_hook <<
@@ -683,11 +683,11 @@ core::VoidResult register_hooks() {
             return 0;
         return res;
     };
-    ASSERT_TRUE_OR_ERR(qwin_hook.enable(), HookFailed);
+    ASSERT_TRUE(qwin_hook.enable(), HookFailed);
 
     auto result_findwnd = manager.hook_by_syscall_name(
         "NtUserFindWindowEx", ssdt::HookType::ShadowSsdt);
-    ASSERT_TRUE_OR_ERR(result_findwnd, HookFailed);
+    ASSERT_TRUE(result_findwnd, HookFailed);
     static auto& find_hook = result_findwnd.value();
     find_hook << [](HWND hWndParent, HWND hWndChildAfter,
                     PUNICODE_STRING lpszClass, PUNICODE_STRING lpszWindow,
@@ -708,11 +708,11 @@ core::VoidResult register_hooks() {
         }
         return res;
     };
-    ASSERT_TRUE_OR_ERR(find_hook.enable(), HookFailed);
+    ASSERT_TRUE(find_hook.enable(), HookFailed);
 
     auto result_build = manager.hook_by_syscall_name(
         "NtUserBuildHwndList", ssdt::HookType::ShadowSsdt);
-    ASSERT_TRUE_OR_ERR(result_build, HookFailed);
+    ASSERT_TRUE(result_build, HookFailed);
     static auto& build_hook = result_build.value();
 
     build_hook << [](HANDLE DesktopHandle, HWND StartWindowHandle,
@@ -758,12 +758,12 @@ core::VoidResult register_hooks() {
         }
         return res;
     };
-    ASSERT_TRUE_OR_ERR(build_hook.enable(), HookFailed);
+    ASSERT_TRUE(build_hook.enable(), HookFailed);
 
     // NtUserGetForegroundWindow
     auto result_fg = manager.hook_by_syscall_name("NtUserGetForegroundWindow",
                                                   ssdt::HookType::ShadowSsdt);
-    ASSERT_TRUE_OR_ERR(result_fg, HookFailed);
+    ASSERT_TRUE(result_fg, HookFailed);
     static auto& fg_hook = result_fg.value();
     static HWND LastForeWnd = HWND(-1);
     fg_hook << [](VOID) -> HWND {
@@ -783,7 +783,7 @@ core::VoidResult register_hooks() {
 
         return res;
     };
-    ASSERT_TRUE_OR_ERR(fg_hook.enable(), HookFailed);
+    ASSERT_TRUE(fg_hook.enable(), HookFailed);
 
     return core::ok();
 }

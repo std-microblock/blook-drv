@@ -17,9 +17,9 @@
         strrchr(__FILE__, '\\') ? strrchr(__FILE__, '\\') + 1 : __FILE__, \
         __LINE__, __FUNCTION__, ##__VA_ARGS__)
 
-#define ASSERT_TRUE_OR_ERR(cond, error_code) ASSERT_EQ_ERR(!!(cond), true, error_code)
+#define ASSERT_TRUE(cond, error_code) ASSERT_EQ(!!(cond), true, error_code)
 
-#define ASSERT_EQ_ERR(actual, expected, error_code)                \
+#define ASSERT_EQ(actual, expected, error_code)                \
     do {                                                           \
         auto _x_val = (actual);                                    \
         auto _y_val = (expected);                                  \

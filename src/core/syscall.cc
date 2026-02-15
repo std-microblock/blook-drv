@@ -1,4 +1,5 @@
 #include "syscall.hpp"
+#include "core/core.hpp"
 
 #include <ntimage.h>
 #include <cstring>
@@ -31,17 +32,13 @@ void free_image(ImageCache* cache) {
 
 core::Result<PUCHAR> load_image_from_file(const wchar_t* path,
                                           ImageCache* cache) {
-    if (!path || !cache) {
-        return core::err(core::ErrorCode::InvalidArgument);
-    }
+    ASSERT_TRUE(path && cache, InvalidArgument);
 
     if (cache->base) {
         return cache->base;
     }
 
-    if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
-        return core::err(core::ErrorCode::InvalidArgument);
-    }
+    ASSERT_TRUE(KeGetCurrentIrql() == PASSIVE_LEVEL, InvalidArgument);
 
     UNICODE_STRING file_name{};
     RtlInitUnicodeString(&file_name, path);
@@ -58,9 +55,7 @@ core::Result<PUCHAR> load_image_from_file(const wchar_t* path,
         &file_handle, GENERIC_READ, &oa, &io, nullptr, FILE_ATTRIBUTE_NORMAL,
         FILE_SHARE_READ, FILE_OPEN, FILE_SYNCHRONOUS_IO_NONALERT, nullptr, 0);
 
-    if (!NT_SUCCESS(status)) {
-        return core::err(core::ErrorCode::NotFound);
-    }
+    ASSERT_TRUE(NT_SUCCESS(status), NotFound);
 
     FILE_STANDARD_INFORMATION std_info{};
     status = ZwQueryInformationFile(file_handle, &io, &std_info,
@@ -175,9 +170,7 @@ PVOID get_export(PUCHAR image, const char* name) {
 }
 
 core::Result<ULONG> extract_syscall_number(PUCHAR fn) {
-    if (!fn) {
-        return core::err(core::ErrorCode::NotFound);
-    }
+    ASSERT_TRUE(fn, NotFound);
 
     for (int i = 0; i < 32; ++i) {
         if (fn[i] == 0xC2 || fn[i] == 0xC3) {
@@ -197,9 +190,7 @@ core::Result<ULONG> extract_syscall_number(PUCHAR fn) {
 namespace core {
 
 Result<ULONG> get_syscall_number(const char* syscall_name) {
-    if (!syscall_name) {
-        return core::err(core::ErrorCode::InvalidArgument);
-    }
+    ASSERT_TRUE(syscall_name, InvalidArgument);
 
     auto image_result = load_image_from_file(L"\\SystemRoot\\System32\\ntdll.dll",
                                              &g_ntdll);
@@ -216,9 +207,7 @@ Result<ULONG> get_syscall_number(const char* syscall_name) {
 }
 
 Result<ULONG> get_shadow_syscall_number(const char* syscall_name) {
-    if (!syscall_name) {
-        return core::err(core::ErrorCode::InvalidArgument);
-    }
+    ASSERT_TRUE(syscall_name, InvalidArgument);
 
     auto image_result = load_image_from_file(L"\\SystemRoot\\System32\\win32u.dll",
                                              &g_win32u);
