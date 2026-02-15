@@ -2,7 +2,7 @@
 #include <windef.h>
 
 #include "core/core.hpp"
-#include "hide.hpp"
+#include "universal_hide.hpp"
 #include "ipc/protocol.hpp"
 #include "ssdt/ssdt.hpp"
 
