@@ -141,19 +141,19 @@ bool kaspersky::initialize() {
 // Performs hypervisor initialization.
 //
 NTSTATUS kaspersky::hvm_init() {
-#define ASSERT_TRUE(x)                                      \
-	if (!(x)) {                                             \
-		log("Assertion failed: %s", #x); \
-		return STATUS_ASSERTION_FAILURE; \
-	}
+#define ASSERT_TRUE(x)                   \
+    if (!(x)) {                          \
+        log("Assertion failed: %s", #x); \
+        return STATUS_ASSERTION_FAILURE; \
+    }
 
-	ASSERT_TRUE(hvm_thread_object);
-	ASSERT_TRUE(*hvm_thread_object);
-	ASSERT_TRUE(hvm_run_requests);
-	ASSERT_TRUE(hvm_notification_event);
-	ASSERT_TRUE(hvm_sync_event);
-	ASSERT_TRUE(hvm_status);
-	ASSERT_TRUE(provider);
+    ASSERT_TRUE(hvm_thread_object);
+    ASSERT_TRUE(*hvm_thread_object);
+    ASSERT_TRUE(hvm_run_requests);
+    ASSERT_TRUE(hvm_notification_event);
+    ASSERT_TRUE(hvm_sync_event);
+    ASSERT_TRUE(hvm_status);
+    ASSERT_TRUE(provider);
 
     //
     // Set provider to random value.

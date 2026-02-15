@@ -13,7 +13,6 @@ DRIVER_UNLOAD DriverUnload;
 constexpr unsigned short NtCreateFile_index = 0x0055;
 
 EXTERN_C NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING) {
-
     if (DriverObject)
         DriverObject->DriverUnload = &DriverUnload;
 
@@ -27,7 +26,6 @@ EXTERN_C NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING) {
         return STATUS_NOT_FOUND;
     }
 
-	
     const auto status = kaspersky::hvm_init();
     if (!NT_SUCCESS(status)) {
         log("hvm_init failed! Status code: 0x%X", status);
