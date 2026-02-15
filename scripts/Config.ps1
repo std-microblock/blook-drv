@@ -1,12 +1,5 @@
-$VMName = "vm1"
-$LocalDest = "./minidumps"
-$User = "RobotAdmin"
-$Pass = "Passw0rd1231"
-$DriverName = "kaspersky-hook"
+$DriverName = "blook-drv"
+$SignRule = "r1"
+$BuildOutputDir = ".\build\windows\x64\releasedbg"
 
-$SecPass = ConvertTo-SecureString $Pass -AsPlainText -Force
-$Cred = New-Object System.Management.Automation.PSCredential($User, $SecPass)
-
-if (!(Test-Path $LocalDest)) { New-Item -ItemType Directory -Path $LocalDest -ErrorAction SilentlyContinue }
-
-Write-Host ">>> Config Loaded for VM: $VMName" -ForegroundColor Gray
+Write-Host ">>> Config Loaded (Local Deployment)" -ForegroundColor Gray
