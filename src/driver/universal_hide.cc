@@ -6,6 +6,7 @@
 #include "core/core.hpp"
 #include "core/expected.hpp"
 #include "ntddscsi.h"
+#include "process_manager.hpp"
 #include "ssdt/ssdt_hook.hpp"
 
 extern "C" {
@@ -46,63 +47,12 @@ typedef struct _CALLBACK_ENTRY_ITEM {
 namespace hide {
 
 namespace globals {
-const wchar_t* wsProtectedProcesses[] = {
-    L"cheatengine-x86_64.exe",
-    L"cheatengine-x86_64-SSE4-AVX2.exe",
-    L"x64dbg.exe",
-    L"windbg.exe",
-    L"SystemInformer.exe",
-};
-const wchar_t* wsMonitoredProcesses[] = {L"Taskmgr.exe"};
-const wchar_t* wsBlacklistedProcessess[] = {L"test_app.exe"};
 const char* szProtectedDrivers[] = {"blook-drv.sys"};
 }  // namespace globals
 
 namespace tools {
 
-bool GetProcessName(HANDLE PID, PUNICODE_STRING out_name) {
-    PEPROCESS process = nullptr;
-    NTSTATUS status = PsLookupProcessByProcessId(PID, &process);
-    if (!NT_SUCCESS(status))
-        return false;
-
-    bool result = GetProcessNameByPEPROCESS(process, out_name);
-    ObDereferenceObject(process);
-    return result;
-}
-
-bool GetProcessNameByPEPROCESS(PEPROCESS process, PUNICODE_STRING out_name) {
-    PUNICODE_STRING name = nullptr;
-    // SeLocateProcessImageName is available on Vista+
-    NTSTATUS status = SeLocateProcessImageName(process, &name);
-    if (!NT_SUCCESS(status))
-        return false;
-
-    out_name->Length = name->Length;
-    out_name->MaximumLength = name->MaximumLength;
-    out_name->Buffer =
-        (PWCH)ExAllocatePoolWithTag(NonPagedPool, name->MaximumLength, 'hide');
-
-    if (out_name->Buffer) {
-        RtlCopyUnicodeString(out_name, name);
-        ExFreePool(name);
-        return true;
-    }
-
-    ExFreePool(name);
-    return false;
-}
-
-void FreeUnicodeString(PUNICODE_STRING str) {
-    if (str && str->Buffer) {
-        ExFreePool(str->Buffer);
-        str->Buffer = nullptr;
-        str->Length = str->MaximumLength = 0;
-    }
-}
-
 void DumpMZ(PUCHAR base) {
-    // Just a stub for now as in the snippet
     UNREFERENCED_PARAMETER(base);
 }
 
@@ -112,145 +62,6 @@ void SwapEndianness(char* str, size_t size) {
         str[i] = str[i + 1];
         str[i + 1] = tmp;
     }
-}
-
-bool IsProtectedProcess(HANDLE PID) {
-    UNICODE_STRING wsProcName{};
-    if (!GetProcessName(PID, &wsProcName))
-        return false;
-
-    bool bResult = false;
-    if (wsProcName.Buffer) {
-        for (int i = 0; i < (int)(sizeof(globals::wsProtectedProcesses) /
-                                  sizeof(globals::wsProtectedProcesses[0]));
-             ++i) {
-            if (wcsstr(wsProcName.Buffer, globals::wsProtectedProcesses[i])) {
-                bResult = true;
-                break;
-            }
-        }
-        FreeUnicodeString(&wsProcName);
-    }
-    return bResult;
-}
-
-bool IsProtectedProcess(ULONG_PTR PID) {
-    return IsProtectedProcess((HANDLE)PID);
-}
-
-bool IsProtectedProcess(PWCH Buffer) {
-    if (!Buffer)
-        return false;
-    for (int i = 0; i < (int)(sizeof(globals::wsProtectedProcesses) /
-                              sizeof(globals::wsProtectedProcesses[0]));
-         ++i) {
-        if (wcsstr(Buffer, globals::wsProtectedProcesses[i])) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool IsProtectedProcessEx(PEPROCESS Process) {
-    UNICODE_STRING wsProcName{};
-    if (!GetProcessNameByPEPROCESS(Process, &wsProcName))
-        return false;
-
-    bool bResult = false;
-    if (wsProcName.Buffer) {
-        for (int i = 0; i < (int)(sizeof(globals::wsProtectedProcesses) /
-                                  sizeof(globals::wsProtectedProcesses[0]));
-             ++i) {
-            if (wcsstr(wsProcName.Buffer, globals::wsProtectedProcesses[i])) {
-                bResult = true;
-                break;
-            }
-        }
-        FreeUnicodeString(&wsProcName);
-    }
-    return bResult;
-}
-
-bool IsMonitoredProcess(HANDLE PID) {
-    UNICODE_STRING wsProcName{};
-    if (!GetProcessName(PID, &wsProcName))
-        return false;
-
-    bool bResult = false;
-    if (wsProcName.Buffer) {
-        for (int i = 0; i < (int)(sizeof(globals::wsMonitoredProcesses) /
-                                  sizeof(globals::wsMonitoredProcesses[0]));
-             ++i) {
-            if (wcsstr(wsProcName.Buffer, globals::wsMonitoredProcesses[i])) {
-                bResult = true;
-                break;
-            }
-        }
-        FreeUnicodeString(&wsProcName);
-    }
-    return bResult;
-}
-
-bool IsMonitoredProcessEx(PEPROCESS Process) {
-    UNICODE_STRING wsProcName{};
-    if (!GetProcessNameByPEPROCESS(Process, &wsProcName))
-        return false;
-
-    bool bResult = false;
-    if (wsProcName.Buffer) {
-        for (int i = 0; i < (int)(sizeof(globals::wsMonitoredProcesses) /
-                                  sizeof(globals::wsMonitoredProcesses[0]));
-             ++i) {
-            if (wcsstr(wsProcName.Buffer, globals::wsMonitoredProcesses[i])) {
-                bResult = true;
-                break;
-            }
-        }
-        FreeUnicodeString(&wsProcName);
-    }
-    return bResult;
-}
-
-bool IsBlacklistedProcess(HANDLE PID) {
-    UNICODE_STRING wsProcName{};
-    if (!GetProcessName(PID, &wsProcName))
-        return false;
-
-    bool bResult = false;
-    if (wsProcName.Buffer) {
-        for (int i = 0; i < (int)(sizeof(globals::wsBlacklistedProcessess) /
-                                  sizeof(globals::wsBlacklistedProcessess[0]));
-             ++i) {
-            if (wcsstr(wsProcName.Buffer,
-                       globals::wsBlacklistedProcessess[i])) {
-                bResult = true;
-                break;
-            }
-        }
-        FreeUnicodeString(&wsProcName);
-    }
-    return bResult;
-}
-
-bool IsBlacklistedProcessEx(PEPROCESS Process) {
-    UNICODE_STRING wsProcName{};
-    if (!GetProcessNameByPEPROCESS(Process, &wsProcName))
-        return false;
-
-    bool bResult = false;
-    if (wsProcName.Buffer) {
-        for (int i = 0; i < (int)(sizeof(globals::wsBlacklistedProcessess) /
-                                  sizeof(globals::wsBlacklistedProcessess[0]));
-             ++i) {
-            if (wcsstr(wsProcName.Buffer,
-                       globals::wsBlacklistedProcessess[i])) {
-                bResult = true;
-                break;
-            }
-        }
-        FreeUnicodeString(&wsProcName);
-    }
-    return bResult;
 }
 
 // --- OB callback patching helpers ------------------------------------------------
@@ -361,8 +172,8 @@ core::VoidResult register_hooks() {
                     PCLIENT_ID ClientId) -> NTSTATUS {
         auto original = open_hook.get_original<NtOpenProcess>();
 
-        if (tools::IsProtectedProcess(PsGetCurrentProcessId())) {
-            // For protected callers: temporarily replace all OB callbacks
+        if (process_manager::current_is_hidden()) {
+            // For hidden (debugger) callers: temporarily replace all OB callbacks
             // (both Process and Thread object types) with no-op stubs, call
             // the original NtOpenProcess, then restore the callbacks.
             SIZE_T procCount = 0, threadCount = 0;
@@ -401,8 +212,8 @@ core::VoidResult register_hooks() {
                                        ObjectAttributes, ClientId);
 
             if (NT_SUCCESS(status) && ClientId) {
-                if (tools::IsBlacklistedProcess(PsGetCurrentProcessId())) {
-                    if (tools::IsProtectedProcess(ClientId->UniqueProcess)) {
+                if (process_manager::current_is_target()) {
+                    if (process_manager::is_hidden(ClientId->UniqueProcess)) {
                         ZwClose(*ProcessHandle);
                         *ProcessHandle = (HANDLE)-1;
                         return STATUS_ACCESS_DENIED;
@@ -426,7 +237,7 @@ core::VoidResult register_hooks() {
         NTSTATUS status =
             original(SystemInformationClass, Buffer, Length, ReturnLength);
 
-        if (tools::IsProtectedProcess(PsGetCurrentProcessId()))
+        if (process_manager::current_is_hidden())
             return status;
 
         if (NT_SUCCESS(status) && Buffer) {
@@ -460,7 +271,7 @@ core::VoidResult register_hooks() {
                 SYSTEM_PROCESS_INFORMATION* pPrev = nullptr;
                 while (pCurr) {
                     if (pCurr->ImageName.Buffer &&
-                        tools::IsProtectedProcess(pCurr->ImageName.Buffer)) {
+                        process_manager::is_hidden(pCurr->ImageName.Buffer)) {
                         if (pPrev) {
                             if (pCurr->NextEntryOffset)
                                 pPrev->NextEntryOffset +=
@@ -497,7 +308,7 @@ core::VoidResult register_hooks() {
         NTSTATUS res = original(ProcessHandle, BaseAddress, Buffer,
                                 NumberOfBytesToWrite, NumberOfBytesWritten);
 
-        if (tools::IsProtectedProcess(PsGetCurrentProcessId()) ||
+        if (process_manager::current_is_hidden() ||
             PsIsSystemProcess(PsGetCurrentProcess()))
             return res;
 
@@ -509,17 +320,17 @@ core::VoidResult register_hooks() {
             if (!NT_SUCCESS(ret))
                 return res;
 
-            if (tools::IsMonitoredProcessEx(Process)) {
+            if (process_manager::is_monitored(Process)) {
                 UNICODE_STRING wsProcName{};
-                if (tools::GetProcessName(PsGetCurrentProcessId(),
-                                          &wsProcName)) {
+                if (process_manager::get_name_by_pid(PsGetCurrentProcessId(),
+                                                    &wsProcName)) {
                     if (wsProcName.Buffer) {
                         auto ShortName = wcsrchr(wsProcName.Buffer, L'\\');
                         log("[ WPM ] From: %p to %ws with BaseAddress 0x%p "
                             "Buffer 0x%p Length %llu",
                             PsGetCurrentProcessId(), ShortName, BaseAddress,
                             Buffer, (unsigned long long)NumberOfBytesToWrite);
-                        tools::FreeUnicodeString(&wsProcName);
+                        process_manager::free_name(&wsProcName);
                     }
                 }
             }
@@ -543,7 +354,7 @@ core::VoidResult register_hooks() {
 
         if (PsIsProtectedProcess(PsGetCurrentProcess()) ||
             PsIsSystemProcess(PsGetCurrentProcess()) ||
-            tools::IsProtectedProcess(PsGetCurrentProcessId()))
+            process_manager::current_is_hidden())
             return res;
 
         if (NT_SUCCESS(res) && BaseAddress && RegionSize &&
@@ -555,17 +366,17 @@ core::VoidResult register_hooks() {
             if (!NT_SUCCESS(ret))
                 return res;
 
-            if (tools::IsMonitoredProcessEx(Process)) {
+            if (process_manager::is_monitored(Process)) {
                 UNICODE_STRING wsProcName{};
-                if (tools::GetProcessName(PsGetCurrentProcessId(),
-                                          &wsProcName)) {
+                if (process_manager::get_name_by_pid(PsGetCurrentProcessId(),
+                                                    &wsProcName)) {
                     if (wsProcName.Buffer) {
                         auto ShortName = wcsrchr(wsProcName.Buffer, L'\\');
                         log("[ AVM ] From: %p to %ws with BaseAddress 0x%p "
                             "Length 0x%llx Type 0x%X Protect 0x%X",
                             PsGetCurrentProcessId(), ShortName, *BaseAddress,
                             *RegionSize, AllocationType, Protect);
-                        tools::FreeUnicodeString(&wsProcName);
+                        process_manager::free_name(&wsProcName);
                     }
                 }
             }
@@ -588,7 +399,7 @@ core::VoidResult register_hooks() {
 
         if (PsIsProtectedProcess(PsGetCurrentProcess()) ||
             PsIsSystemProcess(PsGetCurrentProcess()) ||
-            tools::IsProtectedProcess(PsGetCurrentProcessId()))
+            process_manager::current_is_hidden())
             return res;
 
         if (NT_SUCCESS(res) && BaseAddress && RegionSize &&
@@ -600,10 +411,10 @@ core::VoidResult register_hooks() {
             if (!NT_SUCCESS(ret))
                 return res;
 
-            if (tools::IsMonitoredProcessEx(Process)) {
+            if (process_manager::is_monitored(Process)) {
                 UNICODE_STRING wsProcName{};
-                if (tools::GetProcessName(PsGetCurrentProcessId(),
-                                          &wsProcName)) {
+                if (process_manager::get_name_by_pid(PsGetCurrentProcessId(),
+                                                    &wsProcName)) {
                     if (wsProcName.Buffer) {
                         auto ShortName = wcsrchr(wsProcName.Buffer, L'\\');
                         log("[ FVM ] From: %p to %ws with BaseAddress 0x%p "
@@ -611,7 +422,7 @@ core::VoidResult register_hooks() {
                             PsGetCurrentProcessId(), ShortName, *BaseAddress,
                             *RegionSize, FreeType);
                         tools::DumpMZ((PUCHAR)*BaseAddress);
-                        tools::FreeUnicodeString(&wsProcName);
+                        process_manager::free_name(&wsProcName);
                     }
                 }
             }
@@ -657,7 +468,7 @@ core::VoidResult register_hooks() {
         if (PsIsProtectedProcess(PsGetCurrentProcess()) ||
             PsIsSystemProcess(PsGetCurrentProcess()))
             return res;
-        if (!tools::IsBlacklistedProcessEx(PsGetCurrentProcess()))
+        if (!process_manager::current_is_target_ex())
             return res;
         return 0;
     };
@@ -675,11 +486,11 @@ core::VoidResult register_hooks() {
         if (PsIsProtectedProcess(PsGetCurrentProcess()) ||
             PsIsSystemProcess(PsGetCurrentProcess()))
             return res;
-        if (!tools::IsBlacklistedProcessEx(PsGetCurrentProcess()))
+        if (!process_manager::current_is_target_ex())
             return res;
         auto PID = qwin_hook.get_original<NtUserQueryWindow>()(WindowHandle,
                                                                WindowProcess);
-        if (tools::IsProtectedProcess((HANDLE)PID))
+        if (process_manager::is_hidden((HANDLE)PID))
             return 0;
         return res;
     };
@@ -698,12 +509,12 @@ core::VoidResult register_hooks() {
         if (PsIsProtectedProcess(PsGetCurrentProcess()) ||
             PsIsSystemProcess(PsGetCurrentProcess()))
             return res;
-        if (!tools::IsBlacklistedProcessEx(PsGetCurrentProcess()))
+        if (!process_manager::current_is_target_ex())
             return res;
         if (res) {
             auto PID =
                 qwin_hook.get_original<NtUserQueryWindow>()(res, WindowProcess);
-            if (tools::IsProtectedProcess(PID))
+            if (process_manager::is_hidden(PID))
                 return NULL;
         }
         return res;
@@ -729,13 +540,13 @@ core::VoidResult register_hooks() {
         if (PsIsProtectedProcess(PsGetCurrentProcess()) ||
             PsIsSystemProcess(PsGetCurrentProcess()))
             return res;
-        if (!tools::IsBlacklistedProcessEx(PsGetCurrentProcess()))
+        if (!process_manager::current_is_target_ex())
             return res;
 
         if (IncludeChildren == 1) {
             auto PID = qwin_hook.get_original<NtUserQueryWindow>()(
                 StartWindowHandle, WindowProcess);
-            if (tools::IsProtectedProcess(PID))
+            if (process_manager::is_hidden(PID))
                 return STATUS_UNSUCCESSFUL;
         }
 
@@ -746,7 +557,7 @@ core::VoidResult register_hooks() {
             while (i < *ReturnLength) {
                 auto PID = qwin_hook.get_original<NtUserQueryWindow>()(
                     HwndListInformation[i], WindowProcess);
-                if (tools::IsProtectedProcess(PID)) {
+                if (process_manager::is_hidden(PID)) {
                     for (j = i; j < (*ReturnLength) - 1; j++)
                         HwndListInformation[j] = HwndListInformation[j + 1];
                     HwndListInformation[*ReturnLength - 1] = 0;
@@ -772,11 +583,11 @@ core::VoidResult register_hooks() {
         if (PsIsProtectedProcess(PsGetCurrentProcess()) ||
             PsIsSystemProcess(PsGetCurrentProcess()))
             return res;
-        if (!tools::IsBlacklistedProcessEx(PsGetCurrentProcess()))
+        if (!process_manager::current_is_target_ex())
             return res;
         auto PID =
             qwin_hook.get_original<NtUserQueryWindow>()(res, WindowProcess);
-        if (tools::IsProtectedProcess(PID))
+        if (process_manager::is_hidden(PID))
             return LastForeWnd;
         else
             LastForeWnd = res;
