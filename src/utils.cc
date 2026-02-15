@@ -1,8 +1,5 @@
 #include "utils.hpp"
-
-#include "kernel_modules.hpp"
 #include "pe.hpp"
-
 
 bool data_compare(const char* pdata, const char* bmask, const char* szmask) {
     for (; *szmask; ++szmask, ++pdata, ++bmask) {
@@ -40,7 +37,7 @@ uintptr_t utils::find_pattern_km(const wchar_t* szmodule, const char* szsection,
     if (!szmodule || !szsection || !bmask || !szmask)
         return 0;
 
-    const auto module_base = kernel_modules::get_kernel_module_base(szmodule);
+    const auto module_base = get_kernel_module_base(szmodule);
     return module_base
                ? find_pattern_section(module_base, szsection, bmask, szmask)
                : 0;
@@ -109,4 +106,34 @@ bool utils::init() {
     }
 
     return PsLoadedModuleList && PsLoadedModuleResource;
+}
+
+uintptr_t utils::get_kernel_module_base(const wchar_t* szmodule) {
+    if (!szmodule || !PsLoadedModuleList || !PsLoadedModuleResource)
+        return 0;
+
+    UNICODE_STRING module_name{};
+    RtlInitUnicodeString(&module_name, szmodule);
+
+    KeEnterCriticalRegion();
+    ExAcquireResourceSharedLite(PsLoadedModuleResource, TRUE);
+
+    uintptr_t module_base = 0;
+
+    for (const auto* plist_entry = PsLoadedModuleList->Flink;
+         plist_entry != PsLoadedModuleList; plist_entry = plist_entry->Flink) {
+        const auto* pldr_entry = CONTAINING_RECORD(
+            plist_entry, KLDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+
+        if (!RtlCompareUnicodeString(&pldr_entry->BaseDllName, &module_name,
+                                     TRUE)) {
+            module_base = reinterpret_cast<uintptr_t>(pldr_entry->DllBase);
+            break;
+        }
+    }
+
+    ExReleaseResourceLite(PsLoadedModuleResource);
+    KeLeaveCriticalRegion();
+
+    return module_base;
 }

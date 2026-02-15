@@ -2,7 +2,7 @@
 
 #include <ntifs.h>
 #include <windef.h>
-
+#include "Veil.h"
 //
 // For logging stuff.
 //
@@ -20,4 +20,5 @@ uintptr_t find_pattern_km(const wchar_t* szmodule, const char* szsection,
 void* get_system_routine(const wchar_t* szroutine);
 uintptr_t get_ntos_base();
 bool init();
+uintptr_t get_kernel_module_base(const wchar_t* szmodule);
 }  // namespace utils

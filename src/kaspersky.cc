@@ -1,6 +1,7 @@
 #include "kaspersky.hpp"
 
-#include "kernel_modules.hpp"
+#include "Veil.h"
+
 #include "logger.hpp"
 #include "utils.hpp"
 
@@ -21,7 +22,7 @@ unsigned int* provider = nullptr;
 // Checks if klhk.sys is loaded.
 //
 bool kaspersky::is_klhk_loaded() {
-    return kernel_modules::get_kernel_module_base(L"klhk.sys") != 0;
+    return utils::get_kernel_module_base(L"klhk.sys") != 0;
 }
 
 //
