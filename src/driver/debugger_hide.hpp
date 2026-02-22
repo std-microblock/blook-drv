@@ -13,14 +13,14 @@ namespace debugger_hide {
 //   NtSetInformationProcess    — spoofs ProcessBreakOnTermination / DebugFlags
 //   NtQueryObject              — adjusts DebugObject type counts
 //   NtSystemDebugControl       — returns STATUS_DEBUGGER_INACTIVE
-//   NtClose                    — prevents exception on invalid / protected handles
-//   NtQuerySystemInformation   — hides kernel debugger info, strips processes / handles / pool tags
-//   NtSetContextThread         — filters debug register writes
-//   NtGetContextThread         — returns fake debug registers
-//   NtQueryInformationThread   — spoofs ThreadHideFromDebugger / BreakOnTermination / Wow64Context
-//   NtCreateThreadEx           — strips HIDE_FROM_DEBUGGER / BYPASS_PROCESS_FREEZE flags
-//   NtCreateFile               — hides driver file handles
-//   NtGetNextProcess           — skips hidden processes
+//   NtClose                    — prevents exception on invalid / protected
+//   handles NtQuerySystemInformation   — hides kernel debugger info, strips
+//   processes / handles / pool tags NtSetContextThread         — filters debug
+//   register writes NtGetContextThread         — returns fake debug registers
+//   NtQueryInformationThread   — spoofs ThreadHideFromDebugger /
+//   BreakOnTermination / Wow64Context NtCreateThreadEx           — strips
+//   HIDE_FROM_DEBUGGER / BYPASS_PROCESS_FREEZE flags NtCreateFile — hides
+//   driver file handles NtGetNextProcess           — skips hidden processes
 //   NtOpenProcess              — blocks opening hidden processes
 //   NtOpenThread               — blocks opening hidden process threads
 //   NtYieldExecution           — always returns STATUS_SUCCESS
@@ -30,4 +30,3 @@ namespace debugger_hide {
 core::VoidResult register_hooks();
 
 }  // namespace debugger_hide
-

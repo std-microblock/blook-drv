@@ -84,9 +84,15 @@ static bool match_by_eprocess(PEPROCESS process,
 
 // Classification queries — by PID
 
-bool is_target(HANDLE pid) { return match_by_pid(pid, names::target); }
-bool is_hidden(HANDLE pid) { return match_by_pid(pid, names::hidden); }
-bool is_monitored(HANDLE pid) { return match_by_pid(pid, names::monitored); }
+bool is_target(HANDLE pid) {
+    return match_by_pid(pid, names::target);
+}
+bool is_hidden(HANDLE pid) {
+    return match_by_pid(pid, names::hidden);
+}
+bool is_monitored(HANDLE pid) {
+    return match_by_pid(pid, names::monitored);
+}
 
 // Classification queries — by PEPROCESS
 
@@ -102,11 +108,14 @@ bool is_monitored(PEPROCESS process) {
 
 // Classification queries — by raw name buffer
 
-bool is_target(PWCH buffer) { return match_name_list(buffer, names::target); }
-bool is_hidden(PWCH buffer) { return match_name_list(buffer, names::hidden); }
+bool is_target(PWCH buffer) {
+    return match_name_list(buffer, names::target);
+}
+bool is_hidden(PWCH buffer) {
+    return match_name_list(buffer, names::hidden);
+}
 bool is_monitored(PWCH buffer) {
     return match_name_list(buffer, names::monitored);
 }
 
 }  // namespace process_manager
-

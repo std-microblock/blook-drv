@@ -44,7 +44,8 @@ core::VoidResult SsdtHook::disable() {
 
     if (current == hook_fn_) {
         // top-most hook: restore dispatch to the saved original
-        ASSERT_TRUE(manager_->do_unhook(index_, original_, type_), UnhookFailed);
+        ASSERT_TRUE(manager_->do_unhook(index_, original_, type_),
+                    UnhookFailed);
     } else {
         // middle/unexposed hook: we must patch any hooks that relied on our
         // function being in the chain so they now point to our `original_`.
@@ -143,7 +144,8 @@ core::Result<SsdtHook&> SsdtHookManager::hook_by_index(unsigned short index,
     } else {
         const auto shadow_count = get_shadow_ssdt_count();
         const auto adjusted_index = index - 0x1000;
-        ASSERT_TRUE(shadow_count && adjusted_index < shadow_count, InvalidSsdtIndex);
+        ASSERT_TRUE(shadow_count && adjusted_index < shadow_count,
+                    InvalidSsdtIndex);
     }
 
     // Find a free slot
@@ -226,7 +228,7 @@ core::Result<SsdtHook&> SsdtHookManager::hook_by_syscall_name(
         const auto shadow_count = get_shadow_ssdt_count();
         const auto adjusted_index = index - 0x1000;
         ASSERT_TRUE(shadow_count && adjusted_index < shadow_count,
-                           InvalidSsdtIndex);
+                    InvalidSsdtIndex);
     }
 
     auto slot = find_free_slot();

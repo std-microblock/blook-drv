@@ -1,4 +1,5 @@
 #include <windows.h>
+
 #include <cstdio>
 #include <string>
 
@@ -6,44 +7,33 @@
 
 // Service and driver management
 class DriverService {
-public:
+   public:
     DriverService(const wchar_t* service_name, const wchar_t* driver_path)
-        : service_name_(service_name)
-        , driver_path_(driver_path)
-        , scm_(nullptr)
-        , service_(nullptr) {}
-    
-    ~DriverService() {
-        close();
-    }
-    
+        : service_name_(service_name),
+          driver_path_(driver_path),
+          scm_(nullptr),
+          service_(nullptr) {}
+
+    ~DriverService() { close(); }
+
     bool create_and_start() {
         scm_ = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_ALL_ACCESS);
         if (!scm_) {
             printf("Failed to open SCM: %lu\n", GetLastError());
             return false;
         }
-        
+
         // Try to open existing service first
         service_ = OpenServiceW(scm_, service_name_, SERVICE_ALL_ACCESS);
-        
+
         if (!service_) {
             // Create new service
             service_ = CreateServiceW(
-                scm_,
-                service_name_,
-                service_name_,
-                SERVICE_ALL_ACCESS,
-                SERVICE_KERNEL_DRIVER,
-                SERVICE_DEMAND_START,
-                SERVICE_ERROR_NORMAL,
-                driver_path_,
-                nullptr,
-                nullptr,
-                nullptr,
-                nullptr,
-                nullptr);
-            
+                scm_, service_name_, service_name_, SERVICE_ALL_ACCESS,
+                SERVICE_KERNEL_DRIVER, SERVICE_DEMAND_START,
+                SERVICE_ERROR_NORMAL, driver_path_, nullptr, nullptr, nullptr,
+                nullptr, nullptr);
+
             if (!service_) {
                 printf("Failed to create service: %lu\n", GetLastError());
                 CloseServiceHandle(scm_);
@@ -54,7 +44,7 @@ public:
         } else {
             printf("Service already exists.\n");
         }
-        
+
         // Start the service
         if (!StartServiceW(service_, 0, nullptr)) {
             DWORD error = GetLastError();
@@ -66,10 +56,10 @@ public:
         } else {
             printf("Service started.\n");
         }
-        
+
         return true;
     }
-    
+
     bool stop_and_delete() {
         if (service_) {
             // Stop the service
@@ -79,7 +69,7 @@ public:
                 // Wait for service to stop
                 Sleep(1000);
             }
-            
+
             // Delete the service
             if (DeleteService(service_)) {
                 printf("Service deleted.\n");
@@ -89,20 +79,20 @@ public:
                     printf("Failed to delete service: %lu\n", error);
                 }
             }
-            
+
             CloseServiceHandle(service_);
             service_ = nullptr;
         }
-        
+
         if (scm_) {
             CloseServiceHandle(scm_);
             scm_ = nullptr;
         }
-        
+
         return true;
     }
-    
-private:
+
+   private:
     void close() {
         if (service_) {
             CloseServiceHandle(service_);
@@ -113,7 +103,7 @@ private:
             scm_ = nullptr;
         }
     }
-    
+
     const wchar_t* service_name_;
     const wchar_t* driver_path_;
     SC_HANDLE scm_;
@@ -122,103 +112,84 @@ private:
 
 // IPC Client
 class IpcClient {
-public:
+   public:
     IpcClient() : device_(INVALID_HANDLE_VALUE) {}
-    
-    ~IpcClient() {
-        close();
-    }
-    
+
+    ~IpcClient() { close(); }
+
     bool connect() {
-        device_ = CreateFileW(
-            ipc::kUserModePath,
-            GENERIC_READ | GENERIC_WRITE,
-            0,
-            nullptr,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            nullptr);
-        
+        device_ =
+            CreateFileW(ipc::kUserModePath, GENERIC_READ | GENERIC_WRITE, 0,
+                        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+
         if (device_ == INVALID_HANDLE_VALUE) {
             printf("Failed to connect to driver: %lu\n", GetLastError());
             return false;
         }
-        
+
         return true;
     }
-    
+
     void close() {
         if (device_ != INVALID_HANDLE_VALUE) {
             CloseHandle(device_);
             device_ = INVALID_HANDLE_VALUE;
         }
     }
-    
+
     bool ping() {
         if (device_ == INVALID_HANDLE_VALUE) {
             return false;
         }
-        
+
         ipc::PingRequest request{};
         request.magic = ipc::PingRequest::kMagic;
-        
+
         ipc::PingResponse response{};
         DWORD bytes_returned = 0;
-        
+
         BOOL result = DeviceIoControl(
-            device_,
-            ipc::IOCTL_BLOOK_PING,
-            &request,
-            sizeof(request),
-            &response,
-            sizeof(response),
-            &bytes_returned,
-            nullptr);
-        
+            device_, ipc::IOCTL_BLOOK_PING, &request, sizeof(request),
+            &response, sizeof(response), &bytes_returned, nullptr);
+
         if (!result) {
             printf("Ping failed: %lu\n", GetLastError());
             return false;
         }
-        
+
         if (response.magic != ipc::PingResponse::kMagic) {
             printf("Invalid ping response magic\n");
             return false;
         }
-        
+
         if (response.status != ipc::PingResponse::kStatusOk) {
             printf("Ping returned error status: %lu\n", response.status);
             return false;
         }
-        
+
         return true;
     }
-    
+
     bool get_version(ipc::VersionInfo& version) {
         if (device_ == INVALID_HANDLE_VALUE) {
             return false;
         }
-        
+
         DWORD bytes_returned = 0;
-        
-        BOOL result = DeviceIoControl(
-            device_,
-            ipc::IOCTL_BLOOK_GET_VERSION,
-            nullptr,
-            0,
-            &version,
-            sizeof(version),
-            &bytes_returned,
-            nullptr);
-        
+
+        BOOL result = DeviceIoControl(device_, ipc::IOCTL_BLOOK_GET_VERSION,
+                                      nullptr, 0, &version, sizeof(version),
+                                      &bytes_returned, nullptr);
+
         if (!result) {
             printf("Get version failed: %lu\n", GetLastError());
             return false;
         }
-        
+
         return true;
     }
-    
-private:
+
+   private:
     HANDLE device_;
 };
 
@@ -226,13 +197,13 @@ private:
 std::wstring get_driver_path() {
     wchar_t exe_path[MAX_PATH];
     GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
-    
+
     // Find last backslash
     wchar_t* last_slash = wcsrchr(exe_path, L'\\');
     if (last_slash) {
         *(last_slash + 1) = L'\0';
     }
-    
+
     return std::wstring(exe_path) + L"blook-drv.sys";
 }
 
@@ -243,7 +214,8 @@ void print_usage() {
     printf("  ping      - Send ping to driver\n");
     printf("  version   - Get driver version\n");
     printf("  help      - Show this help\n\n");
-    printf("The driver service is automatically started when the loader runs\n");
+    printf(
+        "The driver service is automatically started when the loader runs\n");
     printf("and stopped when the loader exits.\n");
 }
 
@@ -252,25 +224,25 @@ int wmain(int argc, wchar_t* argv[]) {
         print_usage();
         return 1;
     }
-    
+
     std::wstring command = argv[1];
-    
+
     if (command == L"help" || command == L"-h" || command == L"--help") {
         print_usage();
         return 0;
     }
-    
+
     // Get driver path
     std::wstring driver_path = get_driver_path();
     printf("Driver path: %ls\n", driver_path.c_str());
-    
+
     // Create and start service
     DriverService service(L"BlookDrv", driver_path.c_str());
     if (!service.create_and_start()) {
         printf("Failed to start driver service.\n");
         return 1;
     }
-    
+
     // Connect to driver
     IpcClient client;
     if (!client.connect()) {
@@ -278,9 +250,9 @@ int wmain(int argc, wchar_t* argv[]) {
         service.stop_and_delete();
         return 1;
     }
-    
+
     int result = 0;
-    
+
     // Execute command
     if (command == L"ping") {
         printf("Sending ping...\n");
@@ -293,8 +265,8 @@ int wmain(int argc, wchar_t* argv[]) {
     } else if (command == L"version") {
         ipc::VersionInfo version;
         if (client.get_version(version)) {
-            printf("Driver version: %u.%u.%u\n", 
-                   version.major, version.minor, version.patch);
+            printf("Driver version: %u.%u.%u\n", version.major, version.minor,
+                   version.patch);
         } else {
             printf("Failed to get version.\n");
             result = 1;
@@ -304,10 +276,10 @@ int wmain(int argc, wchar_t* argv[]) {
         print_usage();
         result = 1;
     }
-    
+
     // Cleanup
     client.close();
     service.stop_and_delete();
-    
+
     return result;
 }

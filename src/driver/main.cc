@@ -2,10 +2,10 @@
 #include <windef.h>
 
 #include "core/core.hpp"
-#include "universal_hide.hpp"
 #include "debugger_hide.hpp"
 #include "ipc/protocol.hpp"
 #include "ssdt/ssdt.hpp"
+#include "universal_hide.hpp"
 
 // Driver globals
 PDEVICE_OBJECT g_device_object = nullptr;

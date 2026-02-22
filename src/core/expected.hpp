@@ -142,12 +142,12 @@ class expected<void, E> {
 
 template <typename T, typename E>
 class expected<T&, E> {
-public:
+   public:
     constexpr expected(T& val) : has_val_(true), val_ptr_(&val) {}
-    
-    constexpr expected(const unexpected<E>& err) 
+
+    constexpr expected(const unexpected<E>& err)
         : has_val_(false), error_(err.error) {}
-    constexpr expected(unexpected<E>&& err) 
+    constexpr expected(unexpected<E>&& err)
         : has_val_(false), error_(static_cast<E&&>(err.error)) {}
 
     [[nodiscard]] constexpr bool has_value() const { return has_val_; }
@@ -159,7 +159,7 @@ public:
 
     [[nodiscard]] constexpr const E& error() const { return error_; }
 
-private:
+   private:
     bool has_val_;
     union {
         T* val_ptr_;

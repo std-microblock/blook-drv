@@ -19,13 +19,13 @@
 
 #define ASSERT_TRUE(cond, error_code) ASSERT_EQ(!!(cond), true, error_code)
 
-#define ASSERT_EQ(actual, expected, error_code)                       \
-    do {                                                              \
-        auto _x_val = (actual);                                       \
-        auto _y_val = (expected);                                     \
-        if (_x_val != _y_val) {                                       \
+#define ASSERT_EQ(actual, expected, error_code)                        \
+    do {                                                               \
+        auto _x_val = (actual);                                        \
+        auto _y_val = (expected);                                      \
+        if (_x_val != _y_val) {                                        \
             log("Assertion failed: %s (expected= %d, actual= %d[%x])", \
-                #actual " == " #expected, _y_val, _x_val, _x_val);    \
-            return core::err(core::ErrorCode::error_code);            \
-        }                                                             \
+                #actual " == " #expected, _y_val, _x_val, _x_val);     \
+            return core::err(core::ErrorCode::error_code);             \
+        }                                                              \
     } while (0)

@@ -18,8 +18,9 @@ constexpr const wchar_t* kUserModePath = L"\\\\.\\BlookDrv";
 // IOCTL codes
 constexpr unsigned long kIoctlBase = 0x800;
 
-#define BLOOK_CTL_CODE(code) \
-    CTL_CODE(FILE_DEVICE_UNKNOWN, kIoctlBase + (code), METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define BLOOK_CTL_CODE(code)                                            \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, kIoctlBase + (code), METHOD_BUFFERED, \
+             FILE_ANY_ACCESS)
 
 constexpr unsigned long IOCTL_BLOOK_PING = BLOOK_CTL_CODE(0);
 constexpr unsigned long IOCTL_BLOOK_GET_VERSION = BLOOK_CTL_CODE(1);
@@ -45,6 +46,6 @@ struct VersionInfo {
     unsigned short reserved;
 };
 
-constexpr VersionInfo kDriverVersion = { 1, 0, 0, 0 };
+constexpr VersionInfo kDriverVersion = {1, 0, 0, 0};
 
 }  // namespace ipc

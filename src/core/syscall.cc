@@ -1,9 +1,10 @@
 #include "syscall.hpp"
-#include "core/core.hpp"
 
 #include <ntimage.h>
+
 #include <cstring>
 
+#include "core/core.hpp"
 #include "error.hpp"
 
 namespace {
@@ -76,8 +77,8 @@ core::Result<PUCHAR> load_image_from_file(const wchar_t* path,
     }
 
     LARGE_INTEGER offset{};
-    status = ZwReadFile(file_handle, nullptr, nullptr, nullptr, &io, file_buffer,
-                        file_size, &offset, nullptr);
+    status = ZwReadFile(file_handle, nullptr, nullptr, nullptr, &io,
+                        file_buffer, file_size, &offset, nullptr);
 
     ZwClose(file_handle);
 
@@ -92,15 +93,15 @@ core::Result<PUCHAR> load_image_from_file(const wchar_t* path,
         return core::err(core::ErrorCode::NotFound);
     }
 
-    auto nt = reinterpret_cast<PIMAGE_NT_HEADERS64>(file_buffer + dos->e_lfanew);
+    auto nt =
+        reinterpret_cast<PIMAGE_NT_HEADERS64>(file_buffer + dos->e_lfanew);
     if (nt->Signature != IMAGE_NT_SIGNATURE) {
         ExFreePoolWithTag(file_buffer, kSyscallTag);
         return core::err(core::ErrorCode::NotFound);
     }
 
-    auto image = reinterpret_cast<PUCHAR>(
-        ExAllocatePoolWithTag(NonPagedPool, nt->OptionalHeader.SizeOfImage,
-                              kSyscallTag));
+    auto image = reinterpret_cast<PUCHAR>(ExAllocatePoolWithTag(
+        NonPagedPool, nt->OptionalHeader.SizeOfImage, kSyscallTag));
 
     if (!image) {
         ExFreePoolWithTag(file_buffer, kSyscallTag);
@@ -154,8 +155,10 @@ PVOID get_export(PUCHAR image, const char* name) {
         image + export_dir.VirtualAddress);
 
     auto names = reinterpret_cast<PULONG>(image + exports->AddressOfNames);
-    auto ordinals = reinterpret_cast<PUSHORT>(image + exports->AddressOfNameOrdinals);
-    auto functions = reinterpret_cast<PULONG>(image + exports->AddressOfFunctions);
+    auto ordinals =
+        reinterpret_cast<PUSHORT>(image + exports->AddressOfNameOrdinals);
+    auto functions =
+        reinterpret_cast<PULONG>(image + exports->AddressOfFunctions);
 
     for (ULONG i = 0; i < exports->NumberOfNames; i++) {
         auto function_name = reinterpret_cast<const char*>(image + names[i]);
@@ -192,13 +195,14 @@ namespace core {
 Result<ULONG> get_syscall_number(const char* syscall_name) {
     ASSERT_TRUE(syscall_name, InvalidArgument);
 
-    auto image_result = load_image_from_file(L"\\SystemRoot\\System32\\ntdll.dll",
-                                             &g_ntdll);
+    auto image_result =
+        load_image_from_file(L"\\SystemRoot\\System32\\ntdll.dll", &g_ntdll);
     if (!image_result) {
         return core::err(image_result.error());
     }
 
-    auto fn = reinterpret_cast<PUCHAR>(get_export(image_result.value(), syscall_name));
+    auto fn = reinterpret_cast<PUCHAR>(
+        get_export(image_result.value(), syscall_name));
     if (!fn) {
         return core::err(core::ErrorCode::NotFound);
     }
@@ -209,13 +213,14 @@ Result<ULONG> get_syscall_number(const char* syscall_name) {
 Result<ULONG> get_shadow_syscall_number(const char* syscall_name) {
     ASSERT_TRUE(syscall_name, InvalidArgument);
 
-    auto image_result = load_image_from_file(L"\\SystemRoot\\System32\\win32u.dll",
-                                             &g_win32u);
+    auto image_result =
+        load_image_from_file(L"\\SystemRoot\\System32\\win32u.dll", &g_win32u);
     if (!image_result) {
         return core::err(image_result.error());
     }
 
-    auto fn = reinterpret_cast<PUCHAR>(get_export(image_result.value(), syscall_name));
+    auto fn = reinterpret_cast<PUCHAR>(
+        get_export(image_result.value(), syscall_name));
     if (!fn) {
         return core::err(core::ErrorCode::NotFound);
     }

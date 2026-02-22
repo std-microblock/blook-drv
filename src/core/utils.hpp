@@ -5,7 +5,6 @@
 
 #include "Veil.h"
 
-
 namespace core {
 
 // Pattern matching - uses hex string format

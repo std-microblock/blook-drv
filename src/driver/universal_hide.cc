@@ -1,7 +1,7 @@
 #include "universal_hide.hpp"
 
-#include <winscard.h>
 #include <ntifs.h>
+#include <winscard.h>
 
 #include "core/core.hpp"
 #include "core/expected.hpp"
@@ -64,7 +64,8 @@ void SwapEndianness(char* str, size_t size) {
     }
 }
 
-// --- OB callback patching helpers ------------------------------------------------
+// --- OB callback patching helpers
+// ------------------------------------------------
 
 struct ObCallbackBackup {
     PCALLBACK_ENTRY_ITEM Entry;
@@ -72,8 +73,8 @@ struct ObCallbackBackup {
     POB_POST_OPERATION_CALLBACK OldPost;
 };
 
-static OB_PREOP_CALLBACK_STATUS ObPreOpStub(PVOID RegistrationContext,
-                                            POB_PRE_OPERATION_INFORMATION OpInfo) {
+static OB_PREOP_CALLBACK_STATUS ObPreOpStub(
+    PVOID RegistrationContext, POB_PRE_OPERATION_INFORMATION OpInfo) {
     UNREFERENCED_PARAMETER(RegistrationContext);
     UNREFERENCED_PARAMETER(OpInfo);
     return (OB_PREOP_CALLBACK_STATUS)0; /* continue */
@@ -85,13 +86,12 @@ static void ObPostOpStub(PVOID RegistrationContext,
     UNREFERENCED_PARAMETER(OpInfo);
 }
 
-// Patch every callback entry in `objType->CallbackList` to point at the provided
-// stubs. Returns an allocated array of ObCallbackBackup (must be freed by the
-// caller with ExFreePool) and sets outCount. Returns nullptr on failure.
-static ObCallbackBackup* PatchObjectTypeCallbacks(POBJECT_TYPE objType,
-                                                  POB_PRE_OPERATION_CALLBACK stubPre,
-                                                  POB_POST_OPERATION_CALLBACK stubPost,
-                                                  SIZE_T* outCount) {
+// Patch every callback entry in `objType->CallbackList` to point at the
+// provided stubs. Returns an allocated array of ObCallbackBackup (must be freed
+// by the caller with ExFreePool) and sets outCount. Returns nullptr on failure.
+static ObCallbackBackup* PatchObjectTypeCallbacks(
+    POBJECT_TYPE objType, POB_PRE_OPERATION_CALLBACK stubPre,
+    POB_POST_OPERATION_CALLBACK stubPost, SIZE_T* outCount) {
     if (!objType || !outCount)
         return nullptr;
 
@@ -142,7 +142,8 @@ static ObCallbackBackup* PatchObjectTypeCallbacks(POBJECT_TYPE objType,
     return backups;
 }
 
-static void RestoreObjectTypeCallbacks(ObCallbackBackup* backups, SIZE_T count) {
+static void RestoreObjectTypeCallbacks(ObCallbackBackup* backups,
+                                       SIZE_T count) {
     if (!backups || count == 0)
         return;
 
@@ -173,9 +174,10 @@ core::VoidResult register_hooks() {
         auto original = open_hook.get_original<NtOpenProcess>();
 
         if (process_manager::current_is_hidden()) {
-            // For hidden (debugger) callers: temporarily replace all OB callbacks
-            // (both Process and Thread object types) with no-op stubs, call
-            // the original NtOpenProcess, then restore the callbacks.
+            // For hidden (debugger) callers: temporarily replace all OB
+            // callbacks (both Process and Thread object types) with no-op
+            // stubs, call the original NtOpenProcess, then restore the
+            // callbacks.
             SIZE_T procCount = 0, threadCount = 0;
             auto* procBackups = (tools::ObCallbackBackup*)nullptr;
             auto* threadBackups = (tools::ObCallbackBackup*)nullptr;
@@ -184,15 +186,13 @@ core::VoidResult register_hooks() {
             POBJECT_TYPE pThreadType = *PsThreadType;
 
             if (pProcType)
-                procBackups = tools::PatchObjectTypeCallbacks(pProcType,
-                                                             tools::ObPreOpStub,
-                                                             tools::ObPostOpStub,
-                                                             &procCount);
+                procBackups = tools::PatchObjectTypeCallbacks(
+                    pProcType, tools::ObPreOpStub, tools::ObPostOpStub,
+                    &procCount);
             if (pThreadType)
-                threadBackups = tools::PatchObjectTypeCallbacks(pThreadType,
-                                                                tools::ObPreOpStub,
-                                                                tools::ObPostOpStub,
-                                                                &threadCount);
+                threadBackups = tools::PatchObjectTypeCallbacks(
+                    pThreadType, tools::ObPreOpStub, tools::ObPostOpStub,
+                    &threadCount);
 
             NTSTATUS status = original(ProcessHandle, DesiredAccess,
                                        ObjectAttributes, ClientId);
@@ -323,7 +323,7 @@ core::VoidResult register_hooks() {
             if (process_manager::is_monitored(Process)) {
                 UNICODE_STRING wsProcName{};
                 if (process_manager::get_name_by_pid(PsGetCurrentProcessId(),
-                                                    &wsProcName)) {
+                                                     &wsProcName)) {
                     if (wsProcName.Buffer) {
                         auto ShortName = wcsrchr(wsProcName.Buffer, L'\\');
                         log("[ WPM ] From: %p to %ws with BaseAddress 0x%p "
@@ -369,7 +369,7 @@ core::VoidResult register_hooks() {
             if (process_manager::is_monitored(Process)) {
                 UNICODE_STRING wsProcName{};
                 if (process_manager::get_name_by_pid(PsGetCurrentProcessId(),
-                                                    &wsProcName)) {
+                                                     &wsProcName)) {
                     if (wsProcName.Buffer) {
                         auto ShortName = wcsrchr(wsProcName.Buffer, L'\\');
                         log("[ AVM ] From: %p to %ws with BaseAddress 0x%p "
@@ -414,7 +414,7 @@ core::VoidResult register_hooks() {
             if (process_manager::is_monitored(Process)) {
                 UNICODE_STRING wsProcName{};
                 if (process_manager::get_name_by_pid(PsGetCurrentProcessId(),
-                                                    &wsProcName)) {
+                                                     &wsProcName)) {
                     if (wsProcName.Buffer) {
                         auto ShortName = wcsrchr(wsProcName.Buffer, L'\\');
                         log("[ FVM ] From: %p to %ws with BaseAddress 0x%p "

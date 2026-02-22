@@ -35,7 +35,8 @@ bool hook_ssdt_routine(unsigned short index, void* dest, void** original);
 bool unhook_ssdt_routine(unsigned short index, void* original);
 
 // Hook Shadow SSDT routine (low-level)
-bool hook_shadow_ssdt_routine(unsigned short index, void* dest, void** original);
+bool hook_shadow_ssdt_routine(unsigned short index, void* dest,
+                              void** original);
 
 // Unhook Shadow SSDT routine (low-level)
 bool unhook_shadow_ssdt_routine(unsigned short index, void* original);
