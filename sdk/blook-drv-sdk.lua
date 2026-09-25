@@ -25,6 +25,7 @@ package("blook-drv-sdk")
     set_kind("library", {headeronly = true})
 
     add_urls("https://github.com/std-microblock/blook-drv.git")
+    add_versions("master", "a389a4a6de2ac07d695bed3cf49a5ff3c7460158")
 
     if is_plat("windows") then
         add_syslinks("advapi32")
