@@ -1,211 +1,113 @@
 #include <ntifs.h>
-#include <windef.h>
+#include <wdmsec.h>
 
-#include "core/core.hpp"
-#include "debugger_hide.hpp"
-#include "debugger_peb_hide.hpp"
-#include "ipc/protocol.hpp"
-#include "ssdt/ssdt.hpp"
-#include "universal_hide.hpp"
-
-
-// Driver globals
-PDEVICE_OBJECT g_device_object = nullptr;
-UNICODE_STRING g_device_name = {};
-UNICODE_STRING g_symbolic_link = {};
-bool g_symbolic_link_created = false;
-
-// Forward declarations
-DRIVER_UNLOAD DriverUnload;
-DRIVER_DISPATCH DispatchCreate;
-DRIVER_DISPATCH DispatchClose;
-DRIVER_DISPATCH DispatchDeviceControl;
-
-// IPC dispatch handlers
-NTSTATUS HandlePing(PIRP irp, PIO_STACK_LOCATION stack) {
-    UNREFERENCED_PARAMETER(stack);
-
-    auto* input =
-        static_cast<ipc::PingRequest*>(irp->AssociatedIrp.SystemBuffer);
-    auto* output =
-        static_cast<ipc::PingResponse*>(irp->AssociatedIrp.SystemBuffer);
-
-    if (input->magic != ipc::PingRequest::kMagic) {
-        return STATUS_INVALID_PARAMETER;
-    }
-
-    output->magic = ipc::PingResponse::kMagic;
-    output->status = ipc::PingResponse::kStatusOk;
-
-    irp->IoStatus.Information = sizeof(ipc::PingResponse);
-    return STATUS_SUCCESS;
+#include "session.hpp"
+namespace {
+PDEVICE_OBJECT device{};
+UNICODE_STRING link = RTL_CONSTANT_STRING(L"\\DosDevices\\BlookDrv");
+bool linked{};
+const GUID device_class{0xb15954f0,
+                        0x5889,
+                        0x4d19,
+                        {0x98, 0x11, 0x2c, 0xcf, 0xbe, 0xf8, 0x22, 0x42}};
+// Device ACL. SYSTEM and Administrators always get full access. The optional
+// service-key value `AllowUsers` (REG_DWORD, default 0 - written by
+// `blook-loader apply`) additionally lets *interactive* users open the device,
+// so an unelevated tool can drive it. The device is the only gate, so this is a
+// deliberate trade-off: every process of the logged-on user can then install
+// hooks and toggle the profile. See blook.ini.
+bool allow_users() {
+    UNICODE_STRING path = RTL_CONSTANT_STRING(
+        L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\BlookDrv");
+    OBJECT_ATTRIBUTES attributes{};
+    InitializeObjectAttributes(&attributes, &path,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, nullptr,
+                               nullptr);
+    HANDLE key{};
+    if (!NT_SUCCESS(ZwOpenKey(&key, KEY_QUERY_VALUE, &attributes)))
+        return false;
+    struct {
+        KEY_VALUE_PARTIAL_INFORMATION information;
+        uint8_t data[64];
+    } buffer{};
+    UNICODE_STRING name = RTL_CONSTANT_STRING(L"AllowUsers");
+    ULONG length{};
+    const auto status = ZwQueryValueKey(key, &name, KeyValuePartialInformation,
+                                        &buffer, sizeof(buffer), &length);
+    ZwClose(key);
+    if (!NT_SUCCESS(status) || buffer.information.Type != REG_DWORD ||
+        buffer.information.DataLength < sizeof(uint32_t))
+        return false;
+    return *reinterpret_cast<const uint32_t*>(buffer.information.Data) != 0;
 }
-
-NTSTATUS HandleGetVersion(PIRP irp, PIO_STACK_LOCATION stack) {
-    UNREFERENCED_PARAMETER(stack);
-
-    auto* output =
-        static_cast<ipc::VersionInfo*>(irp->AssociatedIrp.SystemBuffer);
-    *output = ipc::kDriverVersion;
-
-    irp->IoStatus.Information = sizeof(ipc::VersionInfo);
-    return STATUS_SUCCESS;
-}
-
-// Dispatch routines
-NTSTATUS DispatchCreate(PDEVICE_OBJECT device, PIRP irp) {
-    UNREFERENCED_PARAMETER(device);
-
-    irp->IoStatus.Status = STATUS_SUCCESS;
-    irp->IoStatus.Information = 0;
-    IoCompleteRequest(irp, IO_NO_INCREMENT);
-
-    return STATUS_SUCCESS;
-}
-
-NTSTATUS DispatchClose(PDEVICE_OBJECT device, PIRP irp) {
-    UNREFERENCED_PARAMETER(device);
-
-    irp->IoStatus.Status = STATUS_SUCCESS;
-    irp->IoStatus.Information = 0;
-    IoCompleteRequest(irp, IO_NO_INCREMENT);
-
-    return STATUS_SUCCESS;
-}
-
-NTSTATUS DispatchDeviceControl(PDEVICE_OBJECT device, PIRP irp) {
-    UNREFERENCED_PARAMETER(device);
-
-    auto* stack = IoGetCurrentIrpStackLocation(irp);
-    NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
-
-    switch (stack->Parameters.DeviceIoControl.IoControlCode) {
-        case ipc::IOCTL_BLOOK_PING:
-            status = HandlePing(irp, stack);
-            break;
-
-        case ipc::IOCTL_BLOOK_GET_VERSION:
-            status = HandleGetVersion(irp, stack);
-            break;
-
-        default:
-            irp->IoStatus.Information = 0;
-            break;
-    }
-
+NTSTATUS complete(PIRP irp, NTSTATUS status) {
     irp->IoStatus.Status = status;
+    if (!NT_SUCCESS(status))
+        irp->IoStatus.Information = 0;
     IoCompleteRequest(irp, IO_NO_INCREMENT);
-
     return status;
 }
-
-// Cleanup routine
-void Cleanup() {
-    // Unhook all SSDT hooks
-    auto& manager = ssdt::SsdtHookManager::instance();
-    if (manager.is_initialized()) {
-        manager.unhook_all();
-    }
-
-    // Free cached syscall images
-    core::unload_syscall_images();
-
-    // Delete symbolic link
-    if (g_symbolic_link_created) {
-        IoDeleteSymbolicLink(&g_symbolic_link);
-        g_symbolic_link_created = false;
-    }
-
-    // Delete device object
-    if (g_device_object) {
-        IoDeleteDevice(g_device_object);
-        g_device_object = nullptr;
+NTSTATUS dispatch(PDEVICE_OBJECT, PIRP irp) {
+    irp->IoStatus.Information = 0;
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+        return complete(irp, STATUS_INVALID_DEVICE_STATE);
+    auto stack = IoGetCurrentIrpStackLocation(irp);
+    switch (stack->MajorFunction) {
+        case IRP_MJ_CREATE:
+            return complete(irp, blook::open_session(irp, stack->FileObject));
+        case IRP_MJ_CLEANUP:
+            blook::cleanup_session(stack->FileObject);
+            return complete(irp, STATUS_SUCCESS);
+        case IRP_MJ_CLOSE:
+            blook::close_session(stack->FileObject);
+            return complete(irp, STATUS_SUCCESS);
+        case IRP_MJ_DEVICE_CONTROL:
+            return complete(irp, blook::control_session(irp, stack));
+        default:
+            return complete(irp, STATUS_INVALID_DEVICE_REQUEST);
     }
 }
-
-// Driver unload
-void DriverUnload(PDRIVER_OBJECT driver) {
-    UNREFERENCED_PARAMETER(driver);
-
-    log("Driver unloading...");
-    Cleanup();
-    log("Driver unloaded.");
+void cleanup() {
+    if (linked) {
+        IoDeleteSymbolicLink(&link);
+        linked = false;
+    }
+    blook::shutdown_sessions();
+    if (device) {
+        IoDeleteDevice(device);
+        device = nullptr;
+    }
 }
-
-// Driver entry
-EXTERN_C NTSTATUS DriverEntry(PDRIVER_OBJECT driver,
-                              PUNICODE_STRING registry_path) {
-    UNREFERENCED_PARAMETER(registry_path);
-
-    log("BlookDrv loading...");
-
-    NTSTATUS status;
-
-    // Setup driver unload
-    if (driver) {
-        driver->DriverUnload = DriverUnload;
-        driver->MajorFunction[IRP_MJ_CREATE] = DispatchCreate;
-        driver->MajorFunction[IRP_MJ_CLOSE] = DispatchClose;
-        driver->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DispatchDeviceControl;
-    }
-
-    // Create device
-    RtlInitUnicodeString(&g_device_name, ipc::kDeviceName);
-    status = IoCreateDevice(driver, 0, &g_device_name, FILE_DEVICE_UNKNOWN,
-                            FILE_DEVICE_SECURE_OPEN, FALSE, &g_device_object);
-
+void unload(PDRIVER_OBJECT) {
+    cleanup();
+}
+}  // namespace
+extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT driver, PUNICODE_STRING) {
+    driver->DriverUnload = unload;
+    for (auto& handler : driver->MajorFunction)
+        handler = dispatch;
+    auto status = blook::initialize_sessions();
+    if (!NT_SUCCESS(status))
+        return status;
+    UNICODE_STRING name = RTL_CONSTANT_STRING(L"\\Device\\BlookDrv");
+    UNICODE_STRING sddl = RTL_CONSTANT_STRING(L"D:P(A;;GA;;;SY)(A;;GA;;;BA)");
+    if (allow_users())
+        sddl = RTL_CONSTANT_STRING(
+            L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)");
+    status = IoCreateDeviceSecure(driver, 0, &name, FILE_DEVICE_UNKNOWN,
+                                  FILE_DEVICE_SECURE_OPEN, FALSE, &sddl,
+                                  &device_class, &device);
     if (!NT_SUCCESS(status)) {
-        log("Failed to create device: 0x%08X", status);
+        cleanup();
         return status;
     }
-
-    // Create symbolic link
-    RtlInitUnicodeString(&g_symbolic_link, ipc::kSymbolicLink);
-    status = IoCreateSymbolicLink(&g_symbolic_link, &g_device_name);
-
+    status = IoCreateSymbolicLink(&link, &name);
     if (!NT_SUCCESS(status)) {
-        log("Failed to create symbolic link: 0x%08X", status);
-        Cleanup();
+        cleanup();
         return status;
     }
-    g_symbolic_link_created = true;
-
-    // Initialize SSDT hook manager
-    auto& manager = ssdt::SsdtHookManager::instance();
-    auto init_result = manager.initialize();
-
-    if (!init_result) {
-        log("Failed to initialize SSDT hook manager: %s",
-            core::error_to_string(init_result.error()));
-        Cleanup();
-        return STATUS_UNSUCCESSFUL;
-    }
-
-    // Register hide hooks
-    if (auto res = hide::register_hooks(); !res) {
-        log("Failed to register hide hooks: %s",
-            core::error_to_string(res.error()));
-        Cleanup();
-        return STATUS_UNSUCCESSFUL;
-    }
-
-    if (auto res = debugger_peb_hide::register_hooks(); !res) {
-        log("Failed to register debugger PEB hide hooks: %s",
-            core::error_to_string(res.error()));
-        Cleanup();
-        return STATUS_UNSUCCESSFUL;
-    }
-
-    // // Register anti-debug hooks
-    // if (auto res = debugger_hide::register_hooks(); !res) {
-    //     log("Failed to register debugger hide hooks: %s",
-    //         core::error_to_string(res.error()));
-    //     Cleanup();
-    //     return STATUS_UNSUCCESSFUL;
-    // }
-
-    log("BlookDrv loaded successfully. SSDT count: %u, Shadow SSDT count: %u",
-        manager.get_ssdt_count(), manager.get_shadow_ssdt_count());
-
+    linked = true;
+    device->Flags |= DO_BUFFERED_IO;
+    device->Flags &= ~DO_DEVICE_INITIALIZING;
     return STATUS_SUCCESS;
 }
