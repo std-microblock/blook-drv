@@ -19,37 +19,14 @@
 一个脚本搞定全部构建步骤：配置 → 编译 → 宿主机测试 → 签名 → 验签。
 
 ```powershell
-.scriptsBuild.ps1              # 配置 + 编译 + 测试 + 签名 + 验签
-.scriptsBuild.ps1 -NoTests     # 跳过宿主机测试
-.scriptsBuild.ps1 -NoSign      # 只编译（bring-up 用）
-.scriptsBuild.ps1 -Deploy      # 顺便安装服务
-.scriptsBuild.ps1 -Start       # 顺便安装并启动（会接管所有逻辑处理器）
-```
-
-产物在 `build\windows\x64\releasedbg\`：`blook-drv.sys`、`blook-loader.exe`、
-`blook-ept-smoke.exe`、`blook-bench.exe`。
-
-签名由 `signer\CSignTool.exe` 静默完成，签完立刻 `signtool verify /kp` 校验；验签不过脚本
-直接失败，不会放出一个起不来的驱动。
-
-## 部署与检查
-
-```powershell
-.scriptsBuild.ps1 -Start       # 编译 + 签名 + 安装 + 启动
-.scriptsLabTest.ps1            # hook 往返 + 隐藏 profile + 窗口 hook
-.scriptsCleanup.ps1            # 停止并卸载服务（不动驱动文件）
-```
-
-性能基线（未 hook 的代码 / 被拦截的指令 / 被 hook 的页，三态对比，写 `.cache\bench.log`）：
-
-```powershell
-.scriptsBench.ps1
+scripts/Build.ps1              # 配置 + 编译 + 测试 + 签名 + 验签
+scripts/Build.ps1 -NoTests     # 跳过宿主机测试
+scripts/Build.ps1 -NoSign      # 只编译
+scripts/Build.ps1 -Deploy      # 顺便安装服务
+scripts/Build.ps1 -Start       # 顺便安装并启动（会接管所有逻辑处理器）
 ```
 
 ## 用户态 SDK
-
-用户态 API（`src/client`）连同 ABI（`src/ipc`）和纯策略头（`src/policy`）直接当 xmake 包用，
-仓库本身就是 package repository，不放任何源码副本：
 
 ```lua
 add_repositories("blook-repo https://github.com/std-microblock/blook-drv.git")
