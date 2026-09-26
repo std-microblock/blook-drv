@@ -1,6 +1,7 @@
 #include <ntifs.h>
 #include <wdmsec.h>
 
+#include "resources.hpp"
 #include "session.hpp"
 namespace {
 PDEVICE_OBJECT device{};
@@ -21,24 +22,27 @@ bool allow_users() {
         L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\BlookDrv");
     OBJECT_ATTRIBUTES attributes{};
     InitializeObjectAttributes(&attributes, &path,
-                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, nullptr,
-                               nullptr);
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                               nullptr, nullptr);
     HANDLE key{};
     if (!NT_SUCCESS(ZwOpenKey(&key, KEY_QUERY_VALUE, &attributes)))
         return false;
+    const blook::kernel_handle owned_key{key};
     struct {
         KEY_VALUE_PARTIAL_INFORMATION information;
         uint8_t data[64];
     } buffer{};
     UNICODE_STRING name = RTL_CONSTANT_STRING(L"AllowUsers");
     ULONG length{};
-    const auto status = ZwQueryValueKey(key, &name, KeyValuePartialInformation,
-                                        &buffer, sizeof(buffer), &length);
-    ZwClose(key);
+    const auto status =
+        ZwQueryValueKey(owned_key.get(), &name, KeyValuePartialInformation,
+                        &buffer, sizeof(buffer), &length);
     if (!NT_SUCCESS(status) || buffer.information.Type != REG_DWORD ||
         buffer.information.DataLength < sizeof(uint32_t))
         return false;
-    return *reinterpret_cast<const uint32_t*>(buffer.information.Data) != 0;
+    uint32_t value{};
+    RtlCopyMemory(&value, buffer.information.Data, sizeof(value));
+    return value != 0;
 }
 NTSTATUS complete(PIRP irp, NTSTATUS status) {
     irp->IoStatus.Status = status;
@@ -92,8 +96,8 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT driver, PUNICODE_STRING) {
     UNICODE_STRING name = RTL_CONSTANT_STRING(L"\\Device\\BlookDrv");
     UNICODE_STRING sddl = RTL_CONSTANT_STRING(L"D:P(A;;GA;;;SY)(A;;GA;;;BA)");
     if (allow_users())
-        sddl = RTL_CONSTANT_STRING(
-            L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)");
+        sddl =
+            RTL_CONSTANT_STRING(L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)");
     status = IoCreateDeviceSecure(driver, 0, &name, FILE_DEVICE_UNKNOWN,
                                   FILE_DEVICE_SECURE_OPEN, FALSE, &sddl,
                                   &device_class, &device);

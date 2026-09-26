@@ -64,8 +64,9 @@ inline constexpr size_t jump_patch_length = 6;
 [[nodiscard]] inline bool build_jump_patch(uint8_t (&patch)[max_patch],
                                            uint64_t patch_address,
                                            uint64_t literal_address) noexcept {
-    const auto delta = static_cast<long long>(literal_address) -
-                       static_cast<long long>(patch_address + jump_patch_length);
+    const auto delta =
+        static_cast<long long>(literal_address) -
+        static_cast<long long>(patch_address + jump_patch_length);
     if (delta > 0x7fffffffll || delta < -0x80000000ll)
         return false;
     const auto rel = static_cast<int>(delta);
@@ -74,6 +75,46 @@ inline constexpr size_t jump_patch_length = 6;
     for (unsigned i = 0; i < 4; ++i)
         patch[2 + i] = static_cast<uint8_t>(rel >> (i * 8));
     return true;
+}
+
+// Two hooks may share one shadow page iff they patch the same physical page
+// for the same execution scope. Scopes: a kernel hook fires in every address
+// space, so its only company on a page is another kernel hook; user hooks are
+// scoped to an identity page (the owner PEB PFN), so two user hooks on a
+// shared image page coexist as long as their owners differ.
+[[nodiscard]] constexpr bool same_scope(const hook_spec& a,
+                                        const hook_spec& b) noexcept {
+    if (a.pfn != b.pfn)
+        return false;
+    if (a.domain == hook_domain::kernel || b.domain == hook_domain::kernel)
+        return a.domain == b.domain;
+    return a.address_space != 0 && a.address_space == b.address_space;
+}
+
+// The in-page byte ranges the covered instructions of each hook occupy.
+[[nodiscard]] constexpr bool patch_ranges_overlap(const hook_spec& a,
+                                                  const hook_spec& b) noexcept {
+    const auto begin_a = a.target & 0xfff;
+    const auto begin_b = b.target & 0xfff;
+    return begin_a < begin_b + b.length && begin_b < begin_a + a.length;
+}
+
+// May `incoming` live on the same physical page as `existing`? Hooks in
+// the same scope merge into one shadow, which only works when their covered
+// instruction ranges do not overlap; scopes that would both fire in one
+// address space (kernel vs anything) can never share. A physical page shared
+// by several processes may carry one independent hook per process.
+[[nodiscard]] constexpr bool hooks_compatible(
+    const hook_spec& existing, const hook_spec& incoming) noexcept {
+    if (existing.pfn != incoming.pfn)
+        return true;
+    if (existing.domain == hook_domain::kernel ||
+        incoming.domain == hook_domain::kernel)
+        return existing.domain == incoming.domain &&
+               !patch_ranges_overlap(existing, incoming);
+    if (existing.address_space != incoming.address_space)
+        return true;
+    return !patch_ranges_overlap(existing, incoming);
 }
 
 // Pure state transition policy, also exercised by the host tests.

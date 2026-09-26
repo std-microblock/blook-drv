@@ -37,7 +37,7 @@ package("blook-client")
         assert(package:check_cxxsnippets({test = [[
             #include <client/ept.hpp>
             static void probe() {
-                auto session = blook::client::session::open(false);
+                auto session = blook::client::session::open(blook::client::open_mode::read_only);
                 if (session) { auto info = session->query(); (void)info; }
             }
         ]]}, {configs = {languages = "cxx23", cxflags = "/EHsc"}}))

@@ -36,6 +36,7 @@ target("blook-loader")
     set_kind("binary")
     add_defines("NOMINMAX", "UNICODE", "_UNICODE")
     add_files("src/loader/*.cc")
+    add_cxxflags("/utf-8", "/permissive-", "/W4", {tools = "cl"})
     add_includedirs("src")
     add_syslinks("advapi32")
 
@@ -46,6 +47,25 @@ target("blook-tests")
     add_includedirs("third_party/ia32")
     add_includedirs("src")
     add_tests("unit")
+
+-- Fast host-only contracts: these do not open the driver or run virtualization.
+for _, suite in ipairs({"client", "loader", "protocol"}) do
+    target("blook-" .. suite .. "-tests")
+        set_kind("binary")
+        add_defines("NOMINMAX", "UNICODE", "_UNICODE")
+        add_files("tests/" .. suite .. ".cc")
+        add_includedirs("src")
+        add_cxxflags("/utf-8", "/permissive-", "/W4", {tools = "cl"})
+        add_tests("unit")
+end
+
+target("blook-terminal-fixture")
+    set_kind("binary")
+    set_default(false)
+    add_defines("NOMINMAX", "UNICODE", "_UNICODE")
+    add_files("tests/terminal.cc", "src/loader/terminal.cc")
+    add_includedirs("src")
+    add_cxxflags("/utf-8", "/permissive-", "/W4", {tools = "cl"})
 
 target("blook-ept-smoke")
     set_kind("binary")

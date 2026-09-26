@@ -2,7 +2,10 @@
 #include <ntifs.h>
 #include "page-tables.h"
 #include "policy/hook.hpp"
+#include "stats.h"
 namespace hv {
+
+
 inline constexpr uint64_t hypervisor_signature = 0x424c4f4f4b4856ull;
 struct hypervisor {
     struct host_page_tables host_page_tables;

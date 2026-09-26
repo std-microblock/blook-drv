@@ -15,7 +15,24 @@ NTSYSAPI PCHAR __stdcall PsGetProcessImageFileName(PEPROCESS process);
 }
 
 namespace blook {
-class exclusive_lock final {
+// Owns a kernel handle obtained with OBJ_KERNEL_HANDLE. Destruction requires
+// PASSIVE_LEVEL (ZwClose contract); never use this for borrowed object
+// pointers.
+class [[nodiscard]] kernel_handle final {
+    HANDLE value_{};
+
+   public:
+    explicit kernel_handle(HANDLE value) noexcept : value_(value) {}
+    kernel_handle(const kernel_handle&) = delete;
+    kernel_handle& operator=(const kernel_handle&) = delete;
+    ~kernel_handle() {
+        if (value_)
+            ZwClose(value_);
+    }
+    [[nodiscard]] HANDLE get() const noexcept { return value_; }
+};
+
+class [[nodiscard]] exclusive_lock final {
     EX_PUSH_LOCK* lock_;
 
    public:
@@ -39,8 +56,8 @@ class page_lock final {
     ~page_lock() { reset(); }
     page_lock(const page_lock&) = delete;
     page_lock& operator=(const page_lock&) = delete;
-    NTSTATUS acquire(void* page, KPROCESSOR_MODE mode,
-                     LOCK_OPERATION operation = IoReadAccess) {
+    [[nodiscard]] NTSTATUS acquire(void* page, KPROCESSOR_MODE mode,
+                                   LOCK_OPERATION operation = IoReadAccess) {
         reset();
         mdl_ = IoAllocateMdl(page, PAGE_SIZE, FALSE, FALSE, nullptr);
         if (!mdl_)
@@ -69,13 +86,15 @@ class page_lock final {
         }
         mapping_ = nullptr;
     }
-    uint64_t pfn() const { return mdl_ ? MmGetMdlPfnArray(mdl_)[0] : 0; }
-    const uint8_t* data() const {
+    [[nodiscard]] uint64_t pfn() const noexcept {
+        return mdl_ ? MmGetMdlPfnArray(mdl_)[0] : 0;
+    }
+    [[nodiscard]] const uint8_t* data() const noexcept {
         return static_cast<const uint8_t*>(mapping_);
     }
 };
 template <class T>
-T* allocate_object() {
+[[nodiscard]] T* allocate_object() {
     auto memory = ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(T), 'oklB');
     return memory ? new (memory) T{} : nullptr;
 }

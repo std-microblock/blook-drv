@@ -2,10 +2,10 @@
 
 #include <ntifs.h>
 
-#include "driver/hooks.hpp"
-#include "driver/resources.hpp"
 #include "driver/hide/hide.hpp"
+#include "driver/hooks.hpp"
 #include "driver/hv/hv.h"
+#include "driver/resources.hpp"
 
 namespace blook {
 namespace {
@@ -126,7 +126,7 @@ NTSTATUS initialize_sessions() {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     UNICODE_STRING name = RTL_CONSTANT_STRING(L"\\Callback\\PowerState");
-    OBJECT_ATTRIBUTES attributes;
+    OBJECT_ATTRIBUTES attributes{};
     InitializeObjectAttributes(&attributes, &name,
                                OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
                                nullptr, nullptr);
@@ -260,15 +260,32 @@ NTSTATUS control_session(PIRP irp, PIO_STACK_LOCATION stack) {
         case ipc::IOCTL_BLOOK_QUERY: {
             if (input || output < sizeof(ipc::QueryResponse))
                 return STATUS_BUFFER_TOO_SMALL;
-        *static_cast<ipc::QueryResponse*>(buffer) = {ipc::abi_version,
-                                                    hv::ghv.running ? 1u : 0u,
-                                                    value->enabled ? 1u : 0u,
-                                                    user_hook_count(value->pid),
-                                                    hide::active() ? 1u : 0u,
-                                                    ipc::abi_version,
-                                                    manager->backend_status,
-                                                    hide::window_hook_count()};
+            *static_cast<ipc::QueryResponse*>(buffer) = {
+                ipc::abi_version,         hv::ghv.running ? 1u : 0u,
+                value->enabled ? 1u : 0u, user_hook_count(value->pid),
+                hide::active() ? 1u : 0u, ipc::abi_version,
+                manager->backend_status,  hide::window_hook_count()};
             irp->IoStatus.Information = sizeof(ipc::QueryResponse);
+            return STATUS_SUCCESS;
+        }
+        case ipc::IOCTL_BLOOK_STATS: {
+            if (input || output < sizeof(ipc::StatsResponse))
+                return STATUS_BUFFER_TOO_SMALL;
+            auto* out = static_cast<ipc::StatsResponse*>(buffer);
+            *out = {};
+            out->header.version = ipc::abi_version;
+            out->header.size = sizeof(ipc::StatsResponse);
+            out->execute_violations = hv::g_stats.execute_violations;
+            out->data_violations = hv::g_stats.data_violations;
+            out->window_open = hv::g_stats.window_open;
+            out->identity_ok = hv::g_stats.identity_ok;
+            out->identity_mismatch = hv::g_stats.identity_mismatch;
+            out->identity_failed = hv::g_stats.identity_failed;
+            out->internal_entry = hv::g_stats.internal_entry;
+            out->shadow_mapped = hv::g_stats.shadow_mapped;
+            out->original_step = hv::g_stats.original_step;
+            out->unowned_group = hv::g_stats.unowned_group;
+            irp->IoStatus.Information = sizeof(ipc::StatsResponse);
             return STATUS_SUCCESS;
         }
         case ipc::IOCTL_BLOOK_ENABLE:

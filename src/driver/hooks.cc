@@ -1,9 +1,9 @@
-#include "policy/x86_length.hpp"
 #include "hooks.hpp"
 
 #include <ntifs.h>
 
 #include "driver/hv/hv.h"
+#include "policy/x86_length.hpp"
 #include "resources.hpp"
 
 namespace blook {
@@ -46,18 +46,6 @@ void release(hook_entry& entry, bool remove_from_hypervisor) {
     entry.spec = {};
 }
 
-bool duplicate_page(const hook_entry& candidate, const hook_spec& spec,
-                    uint64_t pfn) {
-    if (!candidate.active || candidate.spec.pfn != pfn)
-        return false;
-    // Only one shadow page exists per physical page, so a page can never carry
-    // two hooks unless they belong to the same address space. Kernel hooks are
-    // global, so they collide with everything.
-    const bool global = candidate.spec.domain == hook_domain::kernel ||
-                        spec.domain == hook_domain::kernel;
-    return global || candidate.spec.address_space == spec.address_space;
-}
-
 // A user hook only makes sense on committed executable memory: patching a page
 // the target never executes would be an unmapped PFN trap rather than a hook.
 NTSTATUS check_user_page(void* target) {
@@ -82,24 +70,28 @@ NTSTATUS check_user_page(void* target) {
 // without the registry. Diagnostics only, PASSIVE_LEVEL only, one line per
 // write.
 void bringup_write(const char* label, uint32_t value, bool have_value) {
-    if (KeGetCurrentIrql() != PASSIVE_LEVEL) return;
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+        return;
     UNICODE_STRING path;
     RtlInitUnicodeString(&path, L"\\??\\D:\\blook-drv\\.cache\\driver.log");
     OBJECT_ATTRIBUTES attributes{};
     InitializeObjectAttributes(&attributes, &path,
-                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, nullptr,
-                               nullptr);
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                               nullptr, nullptr);
     HANDLE file{};
     IO_STATUS_BLOCK status{};
-    if (!NT_SUCCESS(ZwCreateFile(&file, FILE_APPEND_DATA | SYNCHRONIZE, &attributes,
-                                 &status, nullptr, FILE_ATTRIBUTE_NORMAL,
-                                 FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_OPEN_IF,
-                                 FILE_SYNCHRONOUS_IO_NONALERT | FILE_WRITE_THROUGH,
-                                 nullptr, 0)))
+    if (!NT_SUCCESS(ZwCreateFile(
+            &file, FILE_APPEND_DATA | SYNCHRONIZE, &attributes, &status,
+            nullptr, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_OPEN_IF, FILE_SYNCHRONOUS_IO_NONALERT | FILE_WRITE_THROUGH,
+            nullptr, 0)))
         return;
     char line[96];
     size_t n = 0;
-    while (label[n] && n < sizeof(line) - 24) { line[n] = label[n]; ++n; }
+    while (label[n] && n < sizeof(line) - 24) {
+        line[n] = label[n];
+        ++n;
+    }
     if (have_value) {
         static const char digits[] = "0123456789abcdef";
         char text[9];
@@ -109,8 +101,10 @@ void bringup_write(const char* label, uint32_t value, bool have_value) {
         line[n++] = '0';
         line[n++] = 'x';
         int first = 0;
-        while (first < 7 && text[first] == '0') ++first;
-        for (int i = first; i < 8; ++i) line[n++] = text[i];
+        while (first < 7 && text[first] == '0')
+            ++first;
+        for (int i = first; i < 8; ++i)
+            line[n++] = text[i];
     }
     line[n++] = '\r';
     line[n++] = '\n';
@@ -142,8 +136,8 @@ bool read_mask_switch(const wchar_t* value, uint32_t bit, bool& allowed) {
         L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\BlookDrv");
     OBJECT_ATTRIBUTES attributes{};
     InitializeObjectAttributes(&attributes, &path,
-                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, nullptr,
-                               nullptr);
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                               nullptr, nullptr);
     HANDLE key{};
     if (!NT_SUCCESS(ZwOpenKey(&key, KEY_QUERY_VALUE, &attributes))) {
         bringup_write("mask: key unreadable, allowing", bit, true);
@@ -239,27 +233,69 @@ size_t instruction_length(const uint8_t* code, size_t available) {
     const auto opcode = code[i++];
     const auto imm = code + i;
     switch (opcode) {
-        case 0x50: case 0x51: case 0x52: case 0x53: case 0x54: case 0x55:
-        case 0x56: case 0x57: case 0x58: case 0x59: case 0x5a: case 0x5b:
-        case 0x5c: case 0x5d: case 0x5e: case 0x5f: case 0x90: case 0xcc:
-        case 0x98: case 0x99: case 0x9c: case 0x9d:
+        case 0x50:
+        case 0x51:
+        case 0x52:
+        case 0x53:
+        case 0x54:
+        case 0x55:
+        case 0x56:
+        case 0x57:
+        case 0x58:
+        case 0x59:
+        case 0x5a:
+        case 0x5b:
+        case 0x5c:
+        case 0x5d:
+        case 0x5e:
+        case 0x5f:
+        case 0x90:
+        case 0xcc:
+        case 0x98:
+        case 0x99:
+        case 0x9c:
+        case 0x9d:
             return i;
-        case 0xb8: case 0xb9: case 0xba: case 0xbb: case 0xbc: case 0xbd:
-        case 0xbe: case 0xbf:
+        case 0xb8:
+        case 0xb9:
+        case 0xba:
+        case 0xbb:
+        case 0xbc:
+        case 0xbd:
+        case 0xbe:
+        case 0xbf:
             if (i + 4 > available)
                 return 0;
             return i + ((rex & 0x08) ? 8 : 4);
-        case 0xe8: case 0xe9:
+        case 0xe8:
+        case 0xe9:
             return i + 4 <= available ? i + 4 : 0;
-        case 0xeb: case 0x6a: case 0xb0: case 0xb1: case 0xb2: case 0xb3:
-        case 0xb4: case 0xb5: case 0xb6: case 0xb7:
+        case 0xeb:
+        case 0x6a:
+        case 0xb0:
+        case 0xb1:
+        case 0xb2:
+        case 0xb3:
+        case 0xb4:
+        case 0xb5:
+        case 0xb6:
+        case 0xb7:
             return i + 1 <= available ? i + 1 : 0;
         case 0x0f:
             if (i >= available)
                 return 0;
             return i + 1;  // nop/syscall/bx-style two byte opcodes
-        case 0x89: case 0x8b: case 0x8d: case 0x83: case 0x81: case 0x2b:
-        case 0x03: case 0x29: case 0x01: case 0x31: case 0x33: {
+        case 0x89:
+        case 0x8b:
+        case 0x8d:
+        case 0x83:
+        case 0x81:
+        case 0x2b:
+        case 0x03:
+        case 0x29:
+        case 0x01:
+        case 0x31:
+        case 0x33: {
             if (i >= available)
                 return 0;
             const auto modrm = code[i];
@@ -301,7 +337,8 @@ uint64_t last_trampoline_address{};
 }  // namespace
 
 uint64_t* hook_jump_literal(uint32_t slot) {
-    if (slot >= 2 * blook::max_hooks) return nullptr;
+    if (slot >= 2 * blook::max_hooks)
+        return nullptr;
     return &jump_literals[slot];
 }
 
@@ -396,11 +433,6 @@ NTSTATUS prepare_hook(uint32_t pid, uint64_t token, void* target,
     }
 
     const auto pfn = slot->page.pfn();
-    for (const auto& entry : store->entries)
-        if (duplicate_page(entry, spec, pfn)) {
-            release(*slot, false);
-            return STATUS_OBJECT_NAME_COLLISION;
-        }
     if (store->next_id == 0) {
         release(*slot, false);
         return STATUS_INTEGER_OVERFLOW;
@@ -413,10 +445,10 @@ NTSTATUS prepare_hook(uint32_t pid, uint64_t token, void* target,
     // Cover whole instructions: a patch whose length lands in the middle of one
     // makes the processor resume inside it, and a trampoline that replays half
     // an instruction jumps into nowhere (both were observed as a double fault
-    // inside the handler). `length` is the minimum - the jump itself - and the
-    // real length is the instruction boundary at or after it. A prologue that
-    // cannot be decoded skips the hook: a missing hook is invisible, a corrupt
-    // one is a bugcheck.
+    // inside the handler). The requested length is the minimum - the jump
+    // itself - and the real length is the instruction boundary at or after it.
+    // A prologue that cannot be decoded skips the hook: a missing hook is
+    // invisible, a corrupt one is a bugcheck.
     size_t covered = length;
     {
         const auto offset = address & 0xfff;
@@ -425,24 +457,44 @@ NTSTATUS prepare_hook(uint32_t pid, uint64_t token, void* target,
         const auto room = 4096 - offset;
         covered = 0;
         while (covered < length) {
-            const auto step = blook::x86::instruction_length(page_code + covered, room - covered);
-            if (!step)
+            const auto step = blook::x86::instruction_length(
+                page_code + covered, room - covered);
+            if (!step) {
+                release(*slot, false);
                 return STATUS_INVALID_PARAMETER;
+            }
             covered += step;
         }
-        if (covered > max_patch || covered > room)
+        if (covered > max_patch || covered > room) {
+            release(*slot, false);
             return STATUS_INVALID_PARAMETER;
+        }
     }
 
     spec.length = static_cast<uint32_t>(covered);
+    // Several hooks on one physical page merge into one shadow per scope, so
+    // page mates are welcome as long as the merge is sound: same-scope hooks
+    // must not overwrite each other's covered instructions, and a kernel
+    // (global) hook never shares with a per-process one. Different processes
+    // sharing the page each keep their own scope. The covered length is
+    // final now, which is what makes the range comparison meaningful.
+    for (const auto& entry : store->entries)
+        if (entry.active && entry.spec.id != spec.id &&
+            !blook::hooks_compatible(entry.spec, spec)) {
+            release(*slot, false);
+            return STATUS_OBJECT_NAME_COLLISION;
+        }
     if (destination) {
         // Built here: the id, and with it the literal slot the jump reads
         // through, is only known now. Out of reach means: do not hook.
         auto* const literal = hook_jump_literal(spec.id);
         uint8_t entry[max_patch]{};
         if (!literal ||
-            !build_jump_patch(entry, address, reinterpret_cast<uint64_t>(literal)))
+            !build_jump_patch(entry, address,
+                              reinterpret_cast<uint64_t>(literal))) {
+            release(*slot, false);
             return STATUS_NOT_SUPPORTED;
+        }
         *literal = reinterpret_cast<uint64_t>(destination);
         for (size_t i = 0; i < covered; ++i)
             spec.patch[i] = i < jump_patch_length ? entry[i] : 0x90;
@@ -468,9 +520,12 @@ NTSTATUS prepare_hook(uint32_t pid, uint64_t token, void* target,
         const auto raw_size = size + PAGE_SIZE;
         auto* raw = static_cast<uint8_t*>(
             ExAllocatePool2(POOL_FLAG_NON_PAGED, raw_size, 'trkB'));
-        auto* trampoline = raw ? reinterpret_cast<uint8_t*>(
-            (reinterpret_cast<unsigned long long>(raw) + PAGE_SIZE - 1) &
-            ~(static_cast<unsigned long long>(PAGE_SIZE) - 1)) : nullptr;
+        auto* trampoline =
+            raw ? reinterpret_cast<uint8_t*>(
+                      (reinterpret_cast<unsigned long long>(raw) + PAGE_SIZE -
+                       1) &
+                      ~(static_cast<unsigned long long>(PAGE_SIZE) - 1))
+                : nullptr;
         bringup_write("trampoline: pool", trampoline ? 1u : 0u, true);
         if (trampoline) {
             // Everything is written through ONE mapping. The MDL system
@@ -500,15 +555,16 @@ NTSTATUS prepare_hook(uint32_t pid, uint64_t token, void* target,
                     MmProbeAndLockPages(mdl, KernelMode, IoReadAccess);
                 } __except (EXCEPTION_EXECUTE_HANDLER) {
                     bringup_write("trampoline: probe raised",
-                                  static_cast<uint32_t>(GetExceptionCode()), true);
+                                  static_cast<uint32_t>(GetExceptionCode()),
+                                  true);
                 }
-                auto* mapped = static_cast<uint8_t*>(
-                    MmMapLockedPagesSpecifyCache(mdl, KernelMode, MmCached,
-                                                 nullptr, FALSE,
-                                                 NormalPagePriority));
+                auto* mapped =
+                    static_cast<uint8_t*>(MmMapLockedPagesSpecifyCache(
+                        mdl, KernelMode, MmCached, nullptr, FALSE,
+                        NormalPagePriority));
                 if (mapped) {
-                    const auto protect = MmProtectMdlSystemAddress(
-                        mdl, PAGE_EXECUTE_READWRITE);
+                    const auto protect =
+                        MmProtectMdlSystemAddress(mdl, PAGE_EXECUTE_READWRITE);
                     bringup_write("trampoline: protect status",
                                   static_cast<uint32_t>(protect), true);
                     if (NT_SUCCESS(protect))
@@ -530,9 +586,9 @@ NTSTATUS prepare_hook(uint32_t pid, uint64_t token, void* target,
                 uint8_t back_patch[max_patch]{};
                 // The literal sits jump_patch_length bytes past the patch, so
                 // the displacement always fits; the check cannot fail here.
-                (void)build_jump_patch(back_patch,
-                                       reinterpret_cast<uint64_t>(code + covered),
-                                       reinterpret_cast<uint64_t>(literal));
+                (void)build_jump_patch(
+                    back_patch, reinterpret_cast<uint64_t>(code + covered),
+                    reinterpret_cast<uint64_t>(literal));
                 for (size_t i = 0; i < jump_patch_length; ++i)
                     code[covered + i] = back_patch[i];
                 prepared.trampoline = code;

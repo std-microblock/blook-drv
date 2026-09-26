@@ -9,14 +9,17 @@
 #   .\scripts\Build.ps1              build + test + sign + verify
 #   .\scripts\Build.ps1 -Deploy      ... and install the service
 #   .\scripts\Build.ps1 -Start       ... and start it (virtualises every CPU!)
-#   .\scripts\Build.ps1 -NoTests     skip blook-tests
+#   .\scripts\Build.ps1 -NoTests     skip all host test suites
+#   .\scripts\Build.ps1 -NoSign -BuildDir build/refactor-check  isolated artifacts
 #   .\scripts\Build.ps1 -NoSign      skip signing (bring-up only)
 [CmdletBinding()]
 param(
     [switch]$Deploy,
     [switch]$Start,
     [switch]$NoTests,
-    [switch]$NoSign
+    [switch]$NoSign,
+    [ValidateNotNullOrEmpty()]
+    [string]$BuildDir = "build"
 )
 # Native tools write diagnostics to stderr; with "Stop" PowerShell turns that
 # into a terminating error before the exit code is even inspected, so every
@@ -24,7 +27,8 @@ param(
 $ErrorActionPreference = "Continue"
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
-$OutDir = Join-Path $RepoRoot "build\windows\x64\releasedbg"
+$BuildRoot = if ([IO.Path]::IsPathRooted($BuildDir)) { $BuildDir } else { Join-Path $RepoRoot $BuildDir }
+$OutDir = Join-Path $BuildRoot "windows\x64\releasedbg"
 $Driver = Join-Path $OutDir "blook-drv.sys"
 $Loader = Join-Path $OutDir "blook-loader.exe"
 $Log = Join-Path $RepoRoot ".cache\build.log"
@@ -74,7 +78,7 @@ $signTool = if ($NoSign) { $null } else { Find-SignTool }
 Push-Location -LiteralPath $RepoRoot
 try {
     Write-Log "=== build.ps1: configure"
-    $configure = & $xmake f -p windows -a x64 -m releasedbg -y 2>&1
+    $configure = & $xmake f -p windows -a x64 -m releasedbg -o $BuildRoot -y 2>&1
     foreach ($line in $configure) { Write-Log ("  " + [string]$line) }
     if ($LASTEXITCODE -ne 0) { throw "xmake configure failed ($LASTEXITCODE)." }
 
@@ -85,9 +89,13 @@ try {
 
     if (-not $NoTests) {
         Write-Log "=== build.ps1: host tests"
-        $tests = & $xmake run blook-tests 2>&1
-        foreach ($line in $tests) { Write-Log ("  " + [string]$line) }
-        if ($LASTEXITCODE -ne 0) { throw "blook-tests failed ($LASTEXITCODE)." }
+        foreach ($suite in @("blook-tests", "blook-protocol-tests", "blook-client-tests", "blook-loader-tests")) {
+            Write-Log ("  suite: " + $suite)
+            $tests = & $xmake run $suite 2>&1
+            $testExit = $LASTEXITCODE
+            foreach ($line in $tests) { Write-Log ("  " + [string]$line) }
+            if ($testExit -ne 0) { throw "$suite failed ($testExit)." }
+        }
     }
 
     if (-not $NoSign) {

@@ -61,9 +61,10 @@ int main() {
     // The entry jump must not clobber an argument register and must not read
     // its target back out of the shadow page.
     uint8_t buffer[max_patch]{};
-    build_jump_patch(buffer,
-                      reinterpret_cast<uint64_t>(buffer) + 0x200000,
-                      reinterpret_cast<uint64_t>(buffer) + 0x200100);
+    check(build_jump_patch(buffer,
+                           reinterpret_cast<uint64_t>(buffer) + 0x200000,
+                           reinterpret_cast<uint64_t>(buffer) + 0x200100),
+          "jump encoder produces a reachable patch");
     // The encoder is covered by the model test; the raw bytes change whenever
     // the entry-jump shape is revisited.
 
@@ -87,6 +88,36 @@ int main() {
         "address space not PID");
     spec.domain = hook_domain::kernel;
     check(same_owner(spec, 0), "kernel scope");
+
+    // Multi-hook pages: who may share a physical page, and where.
+    hook_spec page_a{}, page_b{};
+    page_a.pfn = 10;
+    page_b.pfn = 10;
+    page_a.domain = hook_domain::kernel;
+    page_b.domain = hook_domain::kernel;
+    page_a.target = 0x1000;
+    page_a.length = 6;
+    page_b.target = 0x1010;
+    page_b.length = 6;
+    check(hooks_compatible(page_a, page_b), "kernel hooks share a page");
+    check(same_scope(page_a, page_b), "kernel scope is global");
+    page_b.target = 0x1003;
+    check(!hooks_compatible(page_a, page_b), "overlapping ranges rejected");
+    page_b.domain = hook_domain::user;
+    page_b.address_space = 55;
+    check(!hooks_compatible(page_a, page_b), "kernel never shares with user");
+    page_a.domain = hook_domain::user;
+    page_a.address_space = 55;
+    check(!hooks_compatible(page_a, page_b), "user overlap same scope refused");
+    check(!same_scope(page_a, page_b) ||
+              page_a.address_space == page_b.address_space,
+          "scope sanity");
+    page_b.address_space = 56;
+    check(hooks_compatible(page_a, page_b), "shared page one hook per process");
+    check(!same_scope(page_a, page_b), "different owners different scopes");
+    page_b.pfn = 11;
+    check(hooks_compatible(page_a, page_b),
+          "different pages always compatible");
 
     auto original = select_view(ept_view::original_data, 123, 456);
     auto shadow = select_view(ept_view::shadow_execute, 123, 456);

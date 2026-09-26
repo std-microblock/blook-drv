@@ -1,4 +1,6 @@
 #pragma once
+#include <stddef.h>
+
 #include "policy/integer.hpp"
 
 // Fixed-width, pointer-free METHOD_BUFFERED ABI. READ|WRITE access is
@@ -22,6 +24,7 @@ inline constexpr auto IOCTL_BLOOK_REFRESH = ioctl(5);
 inline constexpr auto IOCTL_BLOOK_QUERY = ioctl(6);
 inline constexpr auto IOCTL_BLOOK_HIDE = ioctl(7);
 inline constexpr auto IOCTL_BLOOK_SCRUB = ioctl(8);
+inline constexpr auto IOCTL_BLOOK_STATS = ioctl(9);
 
 inline constexpr uint32_t abi_version = 4;
 
@@ -29,14 +32,6 @@ struct Header {
     uint32_t version{abi_version};
     uint32_t size{};
 };
-
-template <class T>
-[[nodiscard]] constexpr T request() noexcept {
-    T value{};
-    value.header.version = abi_version;
-    value.header.size = sizeof(T);
-    return value;
-}
 
 struct PingRequest {
     Header header{};
@@ -51,6 +46,27 @@ struct VersionInfo {
     uint16_t major, minor, patch, reserved;
 };
 inline constexpr VersionInfo kDriverVersion{3, 0, 0, 0};
+
+// Diagnostic counters for the user-mode hook path. Purely observational: the
+// numbers say which branch a page access took, which is the only way to tell
+// "the hook never fired" apart from "the page was never fetched".
+struct StatsRequest {
+    Header header{};
+};
+struct StatsResponse {
+    Header header{};
+    uint64_t execute_violations{};
+    uint64_t data_violations{};
+    uint64_t window_open{};
+    uint64_t identity_ok{};
+    uint64_t identity_mismatch{};
+    uint64_t identity_failed{};
+    uint64_t internal_entry{};
+    uint64_t shadow_mapped{};
+    uint64_t original_step{};
+    uint64_t unowned_group{};
+};
+static_assert(sizeof(StatsResponse) <= 128);
 
 struct EnableRequest {
     Header header{};
@@ -108,11 +124,91 @@ struct QueryResponse {
     uint32_t window_hooks{};
 };
 
-static_assert(sizeof(InstallRequest) == 96 && sizeof(InstallResponse) == 8);
-static_assert(sizeof(HookRequest) == 16 && sizeof(QueryResponse) == 32);
-static_assert(sizeof(HideRequest) == 24 && sizeof(ScrubRequest) == 16);
+// ABI v4 layout: fail compilation rather than silently changing the wire
+// format.
+static_assert(sizeof(Header) == 8 && alignof(Header) == 4);
+static_assert(offsetof(Header, version) == 0);
+static_assert(offsetof(Header, size) == 4);
 
+static_assert(sizeof(PingRequest) == 12 && alignof(PingRequest) == 4);
+static_assert(offsetof(PingRequest, header) == 0);
+static_assert(offsetof(PingRequest, magic) == 8);
+
+static_assert(sizeof(PingResponse) == 8 && alignof(PingResponse) == 4);
+static_assert(offsetof(PingResponse, magic) == 0);
+static_assert(offsetof(PingResponse, status) == 4);
+
+static_assert(sizeof(VersionInfo) == 8 && alignof(VersionInfo) == 2);
+static_assert(offsetof(VersionInfo, major) == 0);
+static_assert(offsetof(VersionInfo, minor) == 2);
+static_assert(offsetof(VersionInfo, patch) == 4);
+static_assert(offsetof(VersionInfo, reserved) == 6);
+
+static_assert(sizeof(EnableRequest) == 8 && alignof(EnableRequest) == 4);
+static_assert(offsetof(EnableRequest, header) == 0);
+
+static_assert(sizeof(InstallRequest) == 96 && alignof(InstallRequest) == 8);
+static_assert(offsetof(InstallRequest, header) == 0);
+static_assert(offsetof(InstallRequest, pid) == 8);
+static_assert(offsetof(InstallRequest, flags) == 12);
+static_assert(offsetof(InstallRequest, target) == 16);
+static_assert(offsetof(InstallRequest, length) == 24);
+static_assert(offsetof(InstallRequest, reserved) == 28);
+static_assert(offsetof(InstallRequest, bytes) == 32);
+
+static_assert(sizeof(InstallResponse) == 8 && alignof(InstallResponse) == 8);
+static_assert(offsetof(InstallResponse, id) == 0);
+
+static_assert(sizeof(HookRequest) == 16 && alignof(HookRequest) == 8);
+static_assert(offsetof(HookRequest, header) == 0);
+static_assert(offsetof(HookRequest, id) == 8);
+
+static_assert(sizeof(HideRequest) == 24 && alignof(HideRequest) == 4);
+static_assert(offsetof(HideRequest, header) == 0);
+static_assert(offsetof(HideRequest, enable_hide) == 8);
+static_assert(offsetof(HideRequest, pid) == 12);
+static_assert(offsetof(HideRequest, role) == 16);
+static_assert(offsetof(HideRequest, reserved) == 20);
+
+static_assert(sizeof(ScrubRequest) == 16 && alignof(ScrubRequest) == 4);
+static_assert(offsetof(ScrubRequest, header) == 0);
+static_assert(offsetof(ScrubRequest, pid) == 8);
+static_assert(offsetof(ScrubRequest, flags) == 12);
+
+static_assert(sizeof(QueryResponse) == 32 && alignof(QueryResponse) == 4);
+static_assert(offsetof(QueryResponse, version) == 0);
+static_assert(offsetof(QueryResponse, running) == 4);
+static_assert(offsetof(QueryResponse, enabled) == 8);
+static_assert(offsetof(QueryResponse, hooks) == 12);
+static_assert(offsetof(QueryResponse, hidden) == 16);
+static_assert(offsetof(QueryResponse, abi) == 20);
+static_assert(offsetof(QueryResponse, backend_status) == 24);
+static_assert(offsetof(QueryResponse, window_hooks) == 28);
+
+namespace detail {
+template <class T, class U>
+inline constexpr bool same_type = false;
 template <class T>
+inline constexpr bool same_type<T, T> = true;
+}  // namespace detail
+
+// Exact request types only: a look-alike header does not establish a wire ABI.
+// Keep this constraint independent of STL headers for WDK /kernel builds.
+template <class T>
+concept WireRequest =
+    detail::same_type<T, PingRequest> || detail::same_type<T, EnableRequest> ||
+    detail::same_type<T, InstallRequest> || detail::same_type<T, HookRequest> ||
+    detail::same_type<T, HideRequest> || detail::same_type<T, ScrubRequest>;
+
+template <WireRequest T>
+[[nodiscard]] constexpr T request() noexcept {
+    T value{};
+    value.header.version = abi_version;
+    value.header.size = sizeof(T);
+    return value;
+}
+
+template <WireRequest T>
 [[nodiscard]] constexpr bool valid_header(const T& value) noexcept {
     return value.header.version == abi_version &&
            value.header.size == sizeof(T);
