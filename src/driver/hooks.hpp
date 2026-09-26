@@ -73,7 +73,12 @@ bool hook_present(uint64_t id);
 bool begin_hook_window(uint64_t id);
 void end_hook_window(uint64_t id);
 
-// Drop every hook owned by a process that is going away.
+// Drop only the hooks created by this session, including remote targets.
+// Closing an unrelated (even same-process) session must not affect them.
+void revoke_session(uint64_t token);
+
+// Target-process exit: drop every hook targeting this PID, across sessions.
+// Session creators exiting are handled separately by revoke_session().
 void revoke_process(uint32_t pid);
 
 // Republish every hook after the hypervisor was restarted, e.g. across a

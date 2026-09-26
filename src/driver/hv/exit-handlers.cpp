@@ -766,7 +766,10 @@ void emulate_rdtscp(vcpu* const cpu) {
 
 void handle_monitor_trap_flag(vcpu* const cpu) { rearm_ept(cpu->ept); }
 
-void handle_ept_misconfiguration(vcpu*) { fatal_root_error(); }
+void handle_ept_misconfiguration(vcpu*) {
+  ++g_stats.ept_misconfig;
+  fatal_root_error();
+}
 
 } // namespace hv
 

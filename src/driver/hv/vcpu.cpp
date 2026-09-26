@@ -1,5 +1,6 @@
 // Adapted from jonomango/hv (MIT); see LICENSES/jonomango-hv.txt.
 #include "vcpu.h"
+#include "stats.h"
 #include <ntimage.h>
 #include "hv.h"
 #include "gdt.h"
@@ -230,6 +231,13 @@ bool handle_vm_exit(guest_context* const ctx) {
 
   vmx_vmexit_reason reason;
   reason.flags = static_cast<uint32_t>(vmx_vmread(VMCS_EXIT_REASON));
+
+  // Bring-up diagnostic: which exits do we actually get? An EPT-violation hook
+  // that never fires has two very different explanations, and this is what
+  // tells them apart - "the exit happened and was resolved elsewhere" versus
+  // "the fetch never left guest mode".
+  if (reason.basic_exit_reason < exit_reason_slots)
+    ++g_stats.exit_reasons[reason.basic_exit_reason];
 
   cpu->stop_virtualization   = false;
 

@@ -713,6 +713,16 @@ void end_hook_window(uint64_t id) {
         hv::end_window(id);
 }
 
+void revoke_session(uint64_t token) {
+    if (!store || !token || token == system_token ||
+        KeGetCurrentIrql() != PASSIVE_LEVEL)
+        return;
+    exclusive_lock lock{store->lock};
+    for (auto& entry : store->entries)
+        if (entry.active && entry.token == token)
+            release(entry, true);
+}
+
 void revoke_process(uint32_t pid) {
     if (!store || !pid || KeGetCurrentIrql() != PASSIVE_LEVEL)
         return;

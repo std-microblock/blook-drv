@@ -8,6 +8,7 @@
 namespace hv {
 
 hook_stats g_stats{};
+hook_diag_row g_hook_diag[hook_diag_slots]{};
 
 namespace {
 void invalidate() {
@@ -283,6 +284,24 @@ bool install_ept_hook(vcpu_ept_data& ept, const blook::hook_spec& spec) {
     ept.window_depth[slot] = 0;
     build_shadow(ept, group_index);
     map(*pte, blook::select_view(blook::ept_view::original_data, spec.pfn, 0));
+    // Bring-up diagnostics. Publishing the entry is only half of it: confirm
+    // the entry the install just wrote really is read+write and not
+    // executable, because an entry that is not in the path the processor walks
+    // would keep the fetch from ever faulting and nothing else would show it.
+    if (slot < hook_diag_slots) {
+        auto& row = g_hook_diag[slot];
+        row.id = static_cast<long long>(spec.id);
+        row.target = static_cast<long long>(spec.target);
+        row.pfn = static_cast<long long>(spec.pfn);
+        row.address_space = static_cast<long long>(spec.address_space);
+        row.domain = static_cast<long long>(spec.domain);
+        row.active = 1;
+    }
+    if (pte->read_access && pte->write_access && !pte->execute_access &&
+        pte->page_frame_number == spec.pfn)
+        ++g_stats.armed_entries_verified;
+    else
+        ++g_stats.armed_entries_wrong;
     invalidate();
     return true;
 }
@@ -312,6 +331,7 @@ void remove_ept_hook(vcpu_ept_data& ept, uint64_t id) {
     hook.active = false;
     hook.group = unused_group;
     ept.window_depth[index] = 0;
+    if (index < hook_diag_slots) g_hook_diag[index].active = 0;
     if (group_empty(ept, group_index)) {
         ept.groups[group_index].active = false;
         // The last hook of the page is gone: execute straight from the
@@ -392,6 +412,9 @@ void handle_page_access(vcpu_ept_data& ept, uint64_t physical, bool execute,
         fatal_root_error();
     if (execute) {
         ++g_stats.execute_violations;
+        for (size_t h = 0; h < blook::max_hooks && h < hook_diag_slots; ++h)
+            if (ept.hooks[h].active && ept.hooks[h].spec.pfn == pfn)
+                ++g_hook_diag[h].execute_hits;
         // An open call-original window keeps the page unpatched until the
         // handler closes it.
         if (window_open(ept, pfn)) {
@@ -418,10 +441,18 @@ void handle_page_access(vcpu_ept_data& ept, uint64_t physical, bool execute,
                 }
                 if (!identity) {
                     ++g_stats.identity_failed;
+                    for (size_t h = 0; h < hook_diag_slots; ++h)
+                        if (ept.hooks[h].active &&
+                            ept.hooks[h].group == group_index)
+                            ++g_hook_diag[h].identity_failures;
                     continue;
                 }
                 if (group.address_space != identity) {
                     ++g_stats.identity_mismatch;
+                    for (size_t h = 0; h < hook_diag_slots; ++h)
+                        if (ept.hooks[h].active &&
+                            ept.hooks[h].group == group_index)
+                            ++g_hook_diag[h].identity_mismatches;
                     continue;
                 }
                 ++g_stats.identity_ok;
@@ -457,6 +488,9 @@ void handle_page_access(vcpu_ept_data& ept, uint64_t physical, bool execute,
                                          group.shadow_pfn));
             invalidate();
             ++g_stats.shadow_mapped;
+            for (size_t h = 0; h < hook_diag_slots; ++h)
+                if (ept.hooks[h].active && ept.hooks[h].group == group_index)
+                    ++g_hook_diag[h].shadow_mapped;
             return;
         }
         // No group owns this address space, or the fetch is an internal entry
@@ -494,6 +528,9 @@ void handle_page_access(vcpu_ept_data& ept, uint64_t physical, bool execute,
     // stream able to land on the patched entry bytes without being a function
     // entry.
     ++g_stats.data_violations;
+    for (size_t h = 0; h < hook_diag_slots; ++h)
+        if (ept.hooks[h].active && ept.hooks[h].spec.pfn == pfn)
+            ++g_hook_diag[h].data_hits;
     map(*pte, blook::select_view(blook::ept_view::original_data, pfn, 0));
     invalidate();
 }

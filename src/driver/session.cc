@@ -1,6 +1,7 @@
 #include "session.hpp"
 
 #include <ntifs.h>
+#include <intrin.h>
 
 #include "driver/hide/hide.hpp"
 #include "driver/hooks.hpp"
@@ -38,7 +39,10 @@ void revoke(session& value, bool exiting) {
     if (exiting)
         value.exited = true;
     value.enabled = false;
-    revoke_process(value.pid);
+    // A file object owns a session, not every hook targeting its process.
+    // Diagnostic handles opened beside an active SDK session must be harmless
+    // to close; conversely, this session's remote-target hooks must go too.
+    revoke_session(value.token);
 }
 
 void process_notify(PEPROCESS process, HANDLE, PPS_CREATE_NOTIFY_INFO info) {
@@ -189,6 +193,9 @@ NTSTATUS open_session(PIRP irp, PFILE_OBJECT file) {
     exclusive_lock lock{manager->lock};
     if (manager->stopping || manager->session_count == 64)
         return STATUS_DEVICE_BUSY;
+    // Zero and system_token are reserved; never reuse an ownership token.
+    if (!manager->next_token || manager->next_token == system_token)
+        return STATUS_INTEGER_OVERFLOW;
     auto* value = allocate_object<session>();
     if (!value)
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -285,7 +292,76 @@ NTSTATUS control_session(PIRP irp, PIO_STACK_LOCATION stack) {
             out->shadow_mapped = hv::g_stats.shadow_mapped;
             out->original_step = hv::g_stats.original_step;
             out->unowned_group = hv::g_stats.unowned_group;
+            for (unsigned i = 0; i < ipc::stats_exit_reason_slots; ++i)
+                out->exit_reasons[i] =
+                    static_cast<uint64_t>(hv::g_stats.exit_reasons[i]);
+            out->vcpu_count = hv::g_stats.vcpu_count;
+            out->invept_calls = hv::g_stats.invept_calls;
+            out->invept_error = hv::g_stats.invept_error;
+            out->ept_misconfig = hv::g_stats.ept_misconfig;
+            out->install_rounds = hv::g_stats.install_rounds;
+            out->install_ok_cpus = hv::g_stats.install_ok_cpus;
+            out->install_fail_cpus = hv::g_stats.install_fail_cpus;
+            for (unsigned i = 0; i < ipc::stats_cpu_mask_words; ++i) {
+                out->install_ok_mask[i] =
+                    static_cast<uint64_t>(hv::g_stats.install_ok_mask[i]);
+                out->install_fail_mask[i] =
+                    static_cast<uint64_t>(hv::g_stats.install_fail_mask[i]);
+            }
+            out->armed_entries_verified = hv::g_stats.armed_entries_verified;
+            out->armed_entries_wrong = hv::g_stats.armed_entries_wrong;
+            for (unsigned i = 0; i < ipc::stats_hook_rows; ++i) {
+                const auto& row = hv::g_hook_diag[i];
+                out->hooks[i].id = static_cast<uint32_t>(row.id);
+                out->hooks[i].target = static_cast<uint64_t>(row.target);
+                out->hooks[i].pfn = static_cast<uint64_t>(row.pfn);
+                out->hooks[i].address_space =
+                    static_cast<uint64_t>(row.address_space);
+                out->hooks[i].domain = static_cast<uint32_t>(row.domain);
+                out->hooks[i].active = static_cast<uint32_t>(row.active);
+                out->hooks[i].execute_hits =
+                    static_cast<uint64_t>(row.execute_hits);
+                out->hooks[i].shadow_mapped =
+                    static_cast<uint64_t>(row.shadow_mapped);
+                out->hooks[i].identity_mismatches =
+                    static_cast<uint64_t>(row.identity_mismatches);
+                if (out->hooks[i].active) ++out->hook_rows;
+            }
             irp->IoStatus.Information = sizeof(ipc::StatsResponse);
+            return STATUS_SUCCESS;
+        }
+        case ipc::IOCTL_BLOOK_PROBE: {
+            if (input != sizeof(ipc::ProbeRequest) ||
+                output < sizeof(ipc::ProbeResponse))
+                return STATUS_INFO_LENGTH_MISMATCH;
+            // METHOD_BUFFERED hands the driver ONE buffer that is both the
+            // input and the output, so the request has to be copied out before
+            // anything is written back - writing the response first clobbers
+            // the address that was asked about.
+            auto* out = static_cast<ipc::ProbeResponse*>(buffer);
+            const uint64_t address =
+                reinterpret_cast<ipc::ProbeRequest*>(buffer)->address;
+            out->header.version = ipc::abi_version;
+            out->header.size = sizeof(ipc::ProbeResponse);
+            out->cr3 = __readcr3();
+            out->physical =
+                MmGetPhysicalAddress(reinterpret_cast<void*>(address)).QuadPart;
+            out->pid =
+                reinterpret_cast<uint64_t>(PsGetCurrentProcessId());
+            out->peb = reinterpret_cast<uint64_t>(
+                PsGetProcessPeb(PsGetCurrentProcess()));
+            out->kernel_physical =
+                MmGetPhysicalAddress(&hv::g_stats).QuadPart;
+            {
+                blook::page_lock lock;
+                const auto status =
+                    lock.acquire(reinterpret_cast<void*>(address), UserMode,
+                                 IoReadAccess);
+                out->locked_status =
+                    static_cast<uint64_t>(static_cast<uint32_t>(status));
+                out->locked_pfn = NT_SUCCESS(status) ? lock.pfn() : 0;
+            }
+            irp->IoStatus.Information = sizeof(ipc::ProbeResponse);
             return STATUS_SUCCESS;
         }
         case ipc::IOCTL_BLOOK_ENABLE:

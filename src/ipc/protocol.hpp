@@ -25,6 +25,12 @@ inline constexpr auto IOCTL_BLOOK_QUERY = ioctl(6);
 inline constexpr auto IOCTL_BLOOK_HIDE = ioctl(7);
 inline constexpr auto IOCTL_BLOOK_SCRUB = ioctl(8);
 inline constexpr auto IOCTL_BLOOK_STATS = ioctl(9);
+// Diagnostic: translate one linear address with the *current* page tables. The
+// hypervisor arms an EPT entry for a guest-physical address, so an armed entry
+// that never faults is either not in the path the processor walks or belongs to
+// a different physical page than the one the process is executing. Only a real
+// translation can tell those apart.
+inline constexpr auto IOCTL_BLOOK_PROBE = ioctl(10);
 
 inline constexpr uint32_t abi_version = 4;
 
@@ -53,6 +59,31 @@ inline constexpr VersionInfo kDriverVersion{3, 0, 0, 0};
 struct StatsRequest {
     Header header{};
 };
+// Second round of bring-up instrumentation. A hook that never fires has two
+// completely different explanations and only the driver can tell them apart:
+//  * exit_reasons[48] (EPT violation) stays zero -> the fetch never left guest
+//    mode, so no EPT entry was consulted at all;
+//  * the per-processor install masks say whether the entry was published on
+//    every processor in the first place;
+//  * armed_entries_verified counts the EPT entries that were read back as
+//    "present, writable, not executable" right after they were written.
+inline constexpr unsigned stats_exit_reason_slots = 80;
+inline constexpr unsigned stats_cpu_mask_words = 4;
+inline constexpr unsigned stats_hook_rows = 16;
+
+struct StatsHookRow {
+    uint64_t target{};
+    uint64_t pfn{};
+    uint64_t address_space{};
+    uint64_t execute_hits{};
+    uint64_t shadow_mapped{};
+    uint64_t identity_mismatches{};
+    uint32_t id{};
+    uint32_t domain{};
+    uint32_t active{};
+    uint32_t reserved{};
+};
+
 struct StatsResponse {
     Header header{};
     uint64_t execute_violations{};
@@ -65,8 +96,38 @@ struct StatsResponse {
     uint64_t shadow_mapped{};
     uint64_t original_step{};
     uint64_t unowned_group{};
+
+    uint64_t exit_reasons[stats_exit_reason_slots]{};
+    uint64_t vcpu_count{};
+    uint64_t invept_calls{};
+    uint64_t invept_error{};
+    uint64_t ept_misconfig{};
+    uint64_t install_rounds{};
+    uint64_t install_ok_cpus{};
+    uint64_t install_fail_cpus{};
+    uint64_t install_ok_mask[stats_cpu_mask_words]{};
+    uint64_t install_fail_mask[stats_cpu_mask_words]{};
+    uint64_t armed_entries_verified{};
+    uint64_t armed_entries_wrong{};
+    uint64_t hook_rows{};
+    StatsHookRow hooks[stats_hook_rows]{};
 };
-static_assert(sizeof(StatsResponse) <= 128);
+static_assert(sizeof(StatsResponse) < 4096);
+
+struct ProbeRequest {
+    Header header{};
+    uint64_t address{};
+};
+struct ProbeResponse {
+    Header header{};
+    uint64_t cr3{};
+    uint64_t physical{};         // MmGetPhysicalAddress(address)
+    uint64_t pid{};
+    uint64_t peb{};
+    uint64_t locked_pfn{};       // the way prepare_hook resolves the page
+    uint64_t locked_status{};
+    uint64_t kernel_physical{};  // MmGetPhysicalAddress(&g_stats): does it work here at all
+};
 
 struct EnableRequest {
     Header header{};

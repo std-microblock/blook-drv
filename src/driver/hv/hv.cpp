@@ -103,6 +103,7 @@ NTSTATUS start() {
     initialize_timing_switch();
     initialize_fault_trace();
     ghv.vcpu_count = KeQueryActiveProcessorCountEx(ALL_PROCESSOR_GROUPS);
+    g_stats.vcpu_count = ghv.vcpu_count;
     if (!ghv.vcpu_count) return STATUS_NOT_SUPPORTED;
     // Bring-up instrumentation: record what every logical processor reports
     // before the preflight so a rejection can be explained afterwards.
@@ -202,15 +203,24 @@ void stop() {
 }
 bool install(const blook::hook_spec& spec) {
     if (!ghv.running) return false;
+    ++g_stats.install_rounds;
     for (ULONG i = 0; i < ghv.vcpu_count; ++i) {
         affinity_guard affinity{i};
         hypercall_input input{operation::install};
         input.args[0] = reinterpret_cast<uint64_t>(&spec);
         if (!vmx_vmcall(input)) {
             // Roll back every CPU already changed, before freeing any pinned pages.
+            if (i / 32 < cpu_mask_words)
+                g_stats.install_fail_mask[i / 32] |=
+                    static_cast<long long>(1) << (i % 32);
+            ++g_stats.install_fail_cpus;
             remove(spec.id);
             return false;
         }
+        if (i / 32 < cpu_mask_words)
+            g_stats.install_ok_mask[i / 32] |=
+                static_cast<long long>(1) << (i % 32);
+        ++g_stats.install_ok_cpus;
     }
     return true;
 }

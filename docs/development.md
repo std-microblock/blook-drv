@@ -33,6 +33,7 @@
 | `blook-loader-tests` | 单元测试 | `blook-loader-tests.exe` | CLI 参数解析与 INI 配置文件词法解析测试 |
 | `blook-terminal-fixture` | 诊断固件 | `blook-terminal-fixture.exe` | 终端色彩与格式化输出检查程序（非默认构建目标） |
 | `blook-ept-smoke` | 冒烟测试 | `blook-ept-smoke.exe` | 在实际驱动设备上执行的 EPT 补丁与撤销冒烟测试 |
+| `blook-session-smoke` | 会话回归测试 | `blook-session-smoke.exe` | 按需在实际驱动上验证临时诊断句柄、多会话同页 hook、跨进程会话关闭与目标退出清理；不属于默认构建或宿主机测试 |
 | `blook-bench` | 性能测试 | `blook-bench.exe` | 评估 VMX 虚拟化与系统调用拦截开销的基准测试程序 |
 
 ## 开发与构建工作流
@@ -179,6 +180,19 @@ xmake build -a
 - 测试入口为 [unit.cc](<../tests/unit.cc>) 与 [ept_model.cc](<../tests/ept_model.cc>)。
 - 引入经过模拟桩替换的物理内存分配器与 VMX 特权指令（如 `invept`），直接运行内核 [ept.cpp](<../src/driver/hv/ept.cpp>) 的真实代码。
 - 验证 EPT 4 级页表的构建、页面分割（2 MiB 页拆分为 4 KiB 页）、影子页映射写入、执行权限与读写权限分离以及 hook 撤销时的页表结构复原。
+
+### 实际驱动会话生命周期回归
+
+这组测试必须在隔离的、已加载测试驱动的受支持 Intel 机器上显式运行；不会修改驱动服务配置，也不会注入任何已有进程。测试在自身分配的代码页以及它创建的独立子进程中安装补丁，并直接关闭原始设备句柄，避免 SDK 的 hook 析构先发送 REMOVE 而掩盖驱动清理错误。
+
+```powershell
+xmake build blook-session-smoke
+xmake run blook-session-smoke
+# 仅验证跨进程所有权 / 目标退出清理
+xmake run blook-session-smoke --remote
+```
+
+覆盖临时只读查询、统计、地址探测及空的已使能会话关闭后原 hook 仍生效；不同会话同页 hook 的独立清理与令牌鉴权；关闭创建会话后远程目标恢复原值；目标进程退出后跨会话 hook 全部失效。
 
 ## 命令行交互与诊断
 

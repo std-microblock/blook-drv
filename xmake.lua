@@ -74,6 +74,15 @@ target("blook-ept-smoke")
     add_files("tests/smoke.cc")
     add_includedirs("src")
 
+-- Real-driver lifecycle regression; never part of the host-only test suite.
+target("blook-session-smoke")
+    set_kind("binary")
+    set_default(false)
+    add_defines("NOMINMAX", "UNICODE", "_UNICODE")
+    add_files("tests/session_smoke.cc")
+    add_includedirs("src")
+    add_cxxflags("/utf-8", "/permissive-", "/W4", {tools = "cl"})
+
 target("blook-bench")
     set_kind("binary")
     add_defines("NOMINMAX", "UNICODE", "_UNICODE")
