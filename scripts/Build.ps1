@@ -32,7 +32,6 @@ $OutDir = Join-Path $BuildRoot "windows\x64\releasedbg"
 $Driver = Join-Path $OutDir "blook-drv.sys"
 $Loader = Join-Path $OutDir "blook-loader.exe"
 $Log = Join-Path $RepoRoot ".cache\build.log"
-$SignRule = "r1"
 
 function Write-Log([string]$text) {
     Write-Host $text
@@ -107,12 +106,28 @@ try {
         if ($LASTEXITCODE -eq 0) {
             Write-Log "  already signed and verified; skipping the signer"
         } else {
-            Push-Location -LiteralPath (Join-Path $RepoRoot "signer")
-            try {
-                $sign = & ".\CSignTool.exe" sign /r $SignRule /f $Driver /ac 2>&1
-                foreach ($line in $sign) { Write-Log ("  " + [string]$line) }
-                if ($LASTEXITCODE -ne 0) { throw "CSignTool failed ($LASTEXITCODE)." }
-            } finally { Pop-Location }
+            # spcsign: local Authenticode PKCS#7 builder (SHA-1 + legacy countersignature,
+            # byte-for-byte the shape of the legacy vendor signature that passed
+            # kernel-policy verification).
+            # The signer ships prebuilt in this repo, so the build never compiles it and
+            # never depends on a checkout outside the repo. It finds its SPC templates and
+            # local TSA by walking up from its own directory, i.e. signer\spc-templates\
+            # and signer\tsa\ next door.
+            # Rebuild (only when the signer itself changes):
+            #   dotnet publish <spcsign repo>\src\spcsign -c Release -r win-x64 --self-contained false -o signer\spcsign
+            $signerExe = Join-Path $RepoRoot "signer\spcsign\spcsign.exe"
+            if (-not (Test-Path -LiteralPath $signerExe)) { throw "spcsign.exe not found ($signerExe)." }
+            $chainCerts = @(
+                (Join-Path $RepoRoot "signer\certs\verisign-cscs-2010.cer"),
+                (Join-Path $RepoRoot "signer\certs\verisign-g5-mcvr.cer")
+            )
+            $signArgs = @("sign", "--sha1", "--cert", "XINDA",
+                "--tsa-time", "2013-01-01T00:00:00Z")
+            foreach ($cer in $chainCerts) { $signArgs += @("--chain", $cer) }
+            $signArgs += $Driver
+            $sign = & $signerExe @signArgs 2>&1
+            foreach ($line in $sign) { Write-Log ("  " + [string]$line) }
+            if ($LASTEXITCODE -ne 0) { throw "spcsign failed ($LASTEXITCODE)." }
             $verify = & $signTool verify /kp $Driver 2>&1
             foreach ($line in $verify) { Write-Log ("  " + [string]$line) }
             if ($LASTEXITCODE -ne 0) { throw "signature verification failed; the driver would not load." }
