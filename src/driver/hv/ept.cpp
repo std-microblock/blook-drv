@@ -711,6 +711,13 @@ void handle_page_access(vcpu_ept_data& ept, uint64_t physical, bool execute,
     // exit ping-pong (the observed same-page self-read hang). Run exactly one
     // instruction from the untouched page with read/write/execute; the MTF
     // exit re-arms, exactly like the execute-side original_step path.
+    //
+    // Documented limitation (same trade-off HyperDbg makes): when the
+    // faulting instruction sits inside a patch's covered range, the original
+    // page no longer holds its bytes, so this single step runs the ORIGINAL
+    // instruction - the patch is bypassed for that one execution. Correct
+    // handling would need the access emulated against the shadow/original
+    // split; patches simply must not read or write their own page.
     if (guest_rip != ~0ull) {
         const auto rip_physical =
             platform::translate_guest(platform::guest_cr3(), guest_rip);

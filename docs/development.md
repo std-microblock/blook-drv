@@ -266,9 +266,9 @@ GoogleTest flags 本身不提供挂起超时保护。若实际测试挂起，停
 
 历史实测记录：宿主新增迁移 53 项随机顺序重复 3 轮通过；真实新套件 16 项中 15 项通过、1 项同页自读取挂起，已实际复现，并非 SKIPPED；此前确认挂起的测试进程已终止，但这不证明挂起原因已修复或内核状态已恢复。此前采用隔离执行方式时，上表后五个目标合计 14 项曾在本机实际执行通过（含 BCrypt baseline，真实驱动项未跳过）；该历史结果不代表本轮直接执行结果。
 
-最新使用 `xmake run <target>` 直接执行的记录：宿主 5 个目标通过；`blook-ept-smoke` 2 项、`blook-live-watch` 3 项、`blook-live-cow` 1 项、`blook-session-smoke` 6 项通过；`blook-image-page-tests` 的 BCrypt baseline 1 项通过，live image 用例因 `Unsupported bcrypt prologue` **SKIPPED**，不是通过，也未绕过 prologue 检查。`blook-ept-live-tests` 使用过滤器排除已知挂起用例后，其余 15 项通过；被排除的挂起用例未在本轮验证，不能计为通过或 GoogleTest SKIPPED。此前 image live 通过、本轮跳过的差异须保留，不能写成本轮全部 14 项通过。
+同页自读取挂起的修复记录：根因是 EPT 数据违例路径只切「原始页 RW 无执行」视图——若访存指令本身就在被挂钩页上，其取指在数据视图下违例、访存在影子视图下违例，指令永远无法完成，形成退出乒乓死循环。修复为单步回退（与 HyperDbg 一致）：同页访存违例时切「原始页 RWX」单步一条指令，MTF 退出后重新武装。由此引入**文档化限制**：补丁自身不得包含读写本页的指令（如 RIP 相对自读），此类指令会以原始字节单步执行、该次执行补丁被绕过；回归用例 [jit_test.cc](<../tests/ept_live/jit_test.cc>) 的 `SamePageSelfReadRunsOriginalBytesWithoutHanging` 覆盖「不挂起 + 回退原始字节」语义。修复后 `blook-ept-live-tests` 16 项全过（不再需要排除过滤器），`blook-live-watch` 3 项、`blook-live-cow` 1 项、`blook-ept-smoke` 2 项、`blook-session-smoke` 6 项、新增的 `blook-live-dormant` 3 项（非可执行页休眠注册 → 保护变更武装 → 休眠期撤销）全部通过。
 
-这些通过记录不能抵消同页自读取的挂起证据；问题仍待分析和验证，本指南不依赖隔离执行脚本，也不将更换运行方式视为修复。
+最新使用 `xmake run <target>` 直接执行的记录：宿主 5 个目标通过；`blook-ept-smoke` 2 项、`blook-live-watch` 3 项、`blook-live-cow` 1 项、`blook-session-smoke` 6 项通过；`blook-image-page-tests` 的 BCrypt baseline 1 项通过，live image 用例因 `Unsupported bcrypt prologue` **SKIPPED**，不是通过，也未绕过 prologue 检查。`blook-ept-live-tests` 使用过滤器排除已知挂起用例后，其余 15 项通过；被排除的挂起用例未在本轮验证，不能计为通过或 GoogleTest SKIPPED。此前 image live 通过、本轮跳过的差异须保留，不能写成本轮全部 14 项通过。
 
 ### 实际驱动会话生命周期回归
 

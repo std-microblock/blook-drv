@@ -396,6 +396,13 @@ class session final {
     // shellcode allocation in its read-write stage) is registered dormant and
     // arms itself the moment a protection change makes the page executable,
     // before that VirtualProtect call returns.
+    //
+    // Documented limitation: no instruction in `bytes` may read or write the
+    // patched page itself (e.g. a RIP-relative load of the patch's own
+    // immediate). No single EPT view can express "fetch the shadow, read the
+    // original"; such an instruction single-steps from the original page,
+    // which runs the original bytes and bypasses the patch for that one
+    // execution. Jump patches (what `redirect` builds) never do this.
     template <byte_range Bytes>
     [[nodiscard]] result<hook> patch(void* address, Bytes&& bytes,
                                      pid target = pid::current()) const {
