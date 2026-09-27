@@ -26,7 +26,7 @@ $loader = ".\build\windows\x64\releasedbg\blook-loader.exe"
 
 ### 自动化构建脚本
 
-自动化构建脚本 [Build.ps1](<scripts/Build.ps1>) 集中管理配置、编译、测试、签名与校验流程。在未配置测试签名证书的环境中，指定 `-NoSign` 参数完成编译并执行宿主机测试：
+自动化构建脚本 [Build.ps1](<scripts/Build.ps1>) 集中管理配置、编译、测试与签名流程。在未配置测试签名证书的环境中，指定 `-NoSign` 参数完成编译并执行宿主机测试：
 
 ```powershell
 .\scripts\Build.ps1 -NoSign
@@ -36,7 +36,7 @@ $loader = ".\build\windows\x64\releasedbg\blook-loader.exe"
 
 | 参数 | 执行行为 |
 | --- | --- |
-| `-NoSign` | 跳过内核驱动的数字签名与签名验证阶段 |
+| `-NoSign` | 跳过内核驱动的数字签名阶段 |
 | `-NoTests` | 跳过宿主机单元测试套件的执行 |
 | `-Deploy` | 编译后向系统服务控制管理器（SCM）注册驱动服务 |
 | `-Start` | 注册并启动驱动服务，激活所有逻辑处理器的虚拟化监控 |

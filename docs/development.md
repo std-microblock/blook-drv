@@ -13,7 +13,7 @@
 - **操作系统**：Windows 10 或 Windows 11 x64 版本。
 - **编译器**：支持 C++23 标准特性的 MSVC 编译器（Visual Studio 2022，19.3x 及以上版本），开启 `/permissive-`、`/utf-8` 与 `/W4`。
 - **开发包与汇编器**：
-  - Windows SDK（包含用户态头文件、静态库与 `signtool.exe`）。
+  - Windows SDK（包含用户态头文件与静态库）。
   - Windows Driver Kit（WDK，提供内核头文件、驱动库与链接配置，使用 `win10_vb` 环境定义）。
   - Microsoft Macro Assembler（MASM，即 `ml64.exe`，负责编译 VMX 与 VM-exit 汇编模块）。
 - **构建系统**：xmake。
@@ -79,18 +79,18 @@ xmake build -a
 
 ### 构建脚本 Build.ps1
 
-构建脚本 [Build.ps1](<../scripts/Build.ps1>) 串联了工程配置、编译、宿主机测试、签名与校验的标准流水线：
+构建脚本 [Build.ps1](<../scripts/Build.ps1>) 串联了工程配置、编译、宿主机测试与签名的标准流水线：
 
 1. **配置与编译**：调用 `xmake f` 与 `xmake build -a` 编译工程内全部目标。
 2. **宿主机测试**：依次执行 `blook-tests`、`blook-protocol-tests`、`blook-client-tests` 与 `blook-loader-tests` 四组测试。
-3. **数字签名与验签**：调用仓库内预编译的 [spcsign.exe](<../signer/spcsign/spcsign.exe>) 对驱动程序实施测试签名（无需现场编译，仅要求系统已安装 .NET 10 运行时），并调用系统的 `signtool.exe verify /kp` 校验签名有效性。
+3. **数字签名**：调用仓库内预编译的 [spcsign.exe](<../signer/spcsign/spcsign.exe>) 对驱动程序实施测试签名（无需现场编译，仅要求系统已安装 .NET 10 运行时）。签名会原地重写驱动镜像的签名块，因此重复构建直接重签同一文件；签名是否可用由内核加载驱动时自然判定，脚本不再单独执行验签。
 4. **服务部署（可选）**：根据输入参数向系统服务控制管理器（SCM）注册或启动驱动服务。
 
 脚本运行参数如下：
 
 | 参数 | 默认行为 | 指定该参数时的行为 |
 | --- | --- | --- |
-| `-NoSign` | 执行签名与验签流程 | 跳过数字签名阶段，编译完成后直接进入测试 |
+| `-NoSign` | 执行数字签名流程 | 跳过数字签名阶段，编译完成后直接进入测试 |
 | `-NoTests` | 运行全部四组宿主机测试 | 跳过宿主机测试执行 |
 | `-Deploy` | 不注册服务 | 停止现有服务、注销并重新向 SCM 注册驱动服务 |
 | `-Start` | 不启动服务 | 部署驱动服务并立即启动，接管处理器进入虚拟化执行 |

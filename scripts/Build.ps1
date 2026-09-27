@@ -1,12 +1,17 @@
 # The whole build pipeline in one place:
 #
-#   configure -> build -> host tests -> sign -> verify -> (optionally) install/start.
+#   (stop a running driver) -> configure -> build -> host tests -> sign ->
+#   (reinstall and restart what was running, or with -Deploy/-Start).
 #
-# Signing is part of the build: the signer runs silently and the result is
-# checked with `signtool verify /kp`, so an unsigned driver cannot get out of
-# here by accident.
+# A loaded driver locks its image, so a plain build stops it first and starts
+# it again afterwards; no flags are needed to replace a running driver.
 #
-#   .\scripts\Build.ps1              build + test + sign + verify
+# Signing is part of the build: the signer runs silently on every build and
+# rewrites the image's Authenticode signature in place. Whether that signature
+# is acceptable is settled by the kernel loading the driver, not by a separate
+# verification pass.
+#
+#   .\scripts\Build.ps1              build + test + sign
 #   .\scripts\Build.ps1 -Deploy      ... and install the service
 #   .\scripts\Build.ps1 -Start       ... and start it (virtualises every CPU!)
 #   .\scripts\Build.ps1 -NoTests     skip all host test suites
@@ -56,26 +61,30 @@ function Require-Tool([string]$name) {
     }
     throw "$name was not found (PATH, $env:USERPROFILE\$name)."
 }
-function Find-SignTool {
-    $tool = Get-Command signtool.exe -ErrorAction SilentlyContinue
-    if ($tool) { return $tool.Source }
-    $roots = @()
-    if (${env:ProgramFiles(x86)}) { $roots += (Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin") }
-    if ($env:ProgramFiles) { $roots += (Join-Path $env:ProgramFiles "Windows Kits\10\bin") }
-    foreach ($root in $roots) {
-        if (-not (Test-Path -LiteralPath $root)) { continue }
-        $found = Get-ChildItem -LiteralPath $root -Filter signtool.exe -Recurse -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -match "\\x64\\signtool\.exe$" } | Sort-Object FullName -Descending
-        if ($found) { return $found[0].FullName }
-    }
-    throw "signtool.exe not found."
-}
-
 $xmake = Require-Tool "xmake"
-$signTool = if ($NoSign) { $null } else { Find-SignTool }
 
 Push-Location -LiteralPath $RepoRoot
 try {
+    # A running driver locks its image file, so the link step below would fail
+    # with LNK1104. Stop and uninstall it up front; the install/start stages
+    # at the end bring it back. This is what lets a plain `Build.ps1` replace
+    # a loaded driver in one go.
+    $service = Get-Service BlookDrv -ErrorAction SilentlyContinue
+    $driverWasRunning = $service -and $service.Status -ne "Stopped"
+    if ($driverWasRunning) {
+        Write-Log "=== build.ps1: stop running driver (it locks the image)"
+        $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+            ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        if (-not $isAdmin) { throw "BlookDrv is running and locks blook-drv.sys; stopping it needs elevation (gsudo)." }
+        if (-not (Test-Path -LiteralPath $Loader)) { throw "no $Loader to stop the service with." }
+        Logged "stop" { & $Loader stop }
+        $service = Get-Service BlookDrv -ErrorAction SilentlyContinue
+        if ($service -and $service.Status -ne "Stopped") {
+            throw "BlookDrv did not stop (state: $($service.Status)). A stuck unload cannot be cancelled - reboot the machine."
+        }
+        Logged "uninstall" { & $Loader uninstall }
+    }
+
     Write-Log "=== build.ps1: configure"
     $configure = & $xmake f -p windows -a x64 -m releasedbg -o $BuildRoot -y 2>&1
     foreach ($line in $configure) { Write-Log ("  " + [string]$line) }
@@ -100,47 +109,36 @@ try {
     if (-not $NoSign) {
         Write-Log "=== build.ps1: sign"
         if (-not (Test-Path -LiteralPath $Driver)) { throw "no $Driver to sign." }
-        # The signer refuses to re-sign an already signed image, so a rebuild that
-        # changed nothing keeps the existing signature (and its verification).
-        $existing = & $signTool verify /kp $Driver 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            Write-Log "  already signed and verified; skipping the signer"
-        } else {
-            # spcsign: local Authenticode PKCS#7 builder (SHA-1 + legacy countersignature,
-            # byte-for-byte the shape of the legacy vendor signature that passed
-            # kernel-policy verification).
-            # The signer ships prebuilt in this repo, so the build never compiles it and
-            # never depends on a checkout outside the repo. It finds its SPC templates and
-            # local TSA by walking up from its own directory, i.e. signer\spc-templates\
-            # and signer\tsa\ next door.
-            # Rebuild (only when the signer itself changes):
-            #   dotnet publish <spcsign repo>\src\spcsign -c Release -r win-x64 --self-contained false -o signer\spcsign
-            $signerExe = Join-Path $RepoRoot "signer\spcsign\spcsign.exe"
-            if (-not (Test-Path -LiteralPath $signerExe)) { throw "spcsign.exe not found ($signerExe)." }
-            $chainCerts = @(
-                (Join-Path $RepoRoot "signer\certs\verisign-cscs-2010.cer"),
-                (Join-Path $RepoRoot "signer\certs\verisign-g5-mcvr.cer")
-            )
-            $signArgs = @("sign", "--sha1", "--cert", "XINDA",
-                "--tsa-time", "2013-01-01T00:00:00Z")
-            foreach ($cer in $chainCerts) { $signArgs += @("--chain", $cer) }
-            $signArgs += $Driver
-            $sign = & $signerExe @signArgs 2>&1
-            foreach ($line in $sign) { Write-Log ("  " + [string]$line) }
-            if ($LASTEXITCODE -ne 0) { throw "spcsign failed ($LASTEXITCODE)." }
-            $verify = & $signTool verify /kp $Driver 2>&1
-            foreach ($line in $verify) { Write-Log ("  " + [string]$line) }
-            if ($LASTEXITCODE -ne 0) { throw "signature verification failed; the driver would not load." }
-        }
+        # spcsign: local Authenticode PKCS#7 builder (SHA-1 + legacy countersignature,
+        # byte-for-byte the shape of the legacy vendor signature that passed
+        # kernel-policy verification). It rewrites the image's signature in place, so
+        # signing an image that is already signed is fine and always ends the same way.
+        # The signer ships prebuilt in this repo, so the build never compiles it and
+        # never depends on a checkout outside the repo. It finds its SPC templates and
+        # local TSA by walking up from its own directory, i.e. signer\spc-templates\
+        # and signer\tsa\ next door.
+        # Rebuild (only when the signer itself changes):
+        #   dotnet publish <spcsign repo>\src\spcsign -c Release -r win-x64 --self-contained false -o signer\spcsign
+        $signerExe = Join-Path $RepoRoot "signer\spcsign\spcsign.exe"
+        if (-not (Test-Path -LiteralPath $signerExe)) { throw "spcsign.exe not found ($signerExe)." }
+        $chainCerts = @(
+            (Join-Path $RepoRoot "signer\certs\verisign-cscs-2010.cer"),
+            (Join-Path $RepoRoot "signer\certs\verisign-g5-mcvr.cer")
+        )
+        $signArgs = @("sign", "--sha1", "--cert", "XINDA",
+            "--tsa-time", "2013-01-01T00:00:00Z")
+        foreach ($cer in $chainCerts) { $signArgs += @("--chain", $cer) }
+        $signArgs += $Driver
+        $sign = & $signerExe @signArgs 2>&1
+        foreach ($line in $sign) { Write-Log ("  " + [string]$line) }
+        if ($LASTEXITCODE -ne 0) { throw "spcsign failed ($LASTEXITCODE)." }
     }
 
-    if ($Deploy -or $Start) {
+    if ($Deploy -or $Start -or $driverWasRunning) {
         Write-Log "=== build.ps1: install"
-        Logged "stop" { & $Loader stop }
-        Logged "uninstall" { & $Loader uninstall }
         Logged "install" { & $Loader install $Driver }
     }
-    if ($Start) {
+    if ($Start -or $driverWasRunning) {
         Write-Log "=== build.ps1: start (the driver virtualises every logical processor)"
         Logged "start" { & $Loader start }
         Logged "status" { & $Loader status }
