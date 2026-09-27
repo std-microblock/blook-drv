@@ -36,6 +36,16 @@ struct hook_slot {
     bool active{};
 };
 
+// An execute watch: the page is armed read/write but not executable. A fetch
+// exactly at spec.target in the owning address space dumps into the shared
+// record and disarms this processor's entry (one-shot); any other fetch on
+// the page is single-stepped and re-armed, exactly like an unowned hook page.
+struct watch_slot {
+    blook::watch_spec spec{};
+    blook::watch_record* record{};
+    bool active{};
+};
+
 struct vcpu_ept_data {
     alignas(4096) ept_pml4e pml4[512];
     alignas(4096) ept_pdpte pdpt[512];
@@ -48,6 +58,7 @@ struct vcpu_ept_data {
     bool permanent_split[ept_split_count];
     page_group groups[blook::max_hooks];
     hook_slot hooks[blook::max_hooks];
+    watch_slot watches[blook::max_watches];
     ept_pte* temporary[blook::max_hooks]{};
     size_t temporary_count{};
     // Nesting depth of call-original windows. While non-zero the hooked page
@@ -62,6 +73,9 @@ ept_pte* get_ept_pte(vcpu_ept_data& ept, uint64_t physical, bool split = false);
 bool install_ept_hook(vcpu_ept_data& ept, const blook::hook_spec& spec);
 void remove_ept_hook(vcpu_ept_data& ept, uint64_t id);
 void refresh_ept_hook(vcpu_ept_data& ept, uint64_t id);
+bool install_ept_watch(vcpu_ept_data& ept, const blook::watch_spec& spec,
+                       blook::watch_record* record);
+void remove_ept_watch(vcpu_ept_data& ept, uint64_t id);
 bool begin_ept_window(vcpu_ept_data& ept, uint64_t id);
 bool end_ept_window(vcpu_ept_data& ept, uint64_t id);
 void rearm_ept(vcpu_ept_data& ept);

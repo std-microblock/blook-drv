@@ -702,6 +702,80 @@ bool hook_present(uint64_t id) {
     return find_locked(id) != nullptr;
 }
 
+namespace {
+volatile uint64_t rebinds{};
+volatile uint64_t rebind_failures{};
+}  // namespace
+
+uint64_t rebind_count() { return rebinds; }
+uint64_t rebind_failure_count() { return rebind_failures; }
+
+NTSTATUS rebind_hooks_if_copied(uint32_t pid, const void* base, size_t size) {
+    if (!store || KeGetCurrentIrql() != PASSIVE_LEVEL || !pid || !base || !size)
+        return STATUS_INVALID_PARAMETER;
+    if (!hv::ghv.running)
+        return STATUS_DEVICE_NOT_READY;
+    const auto begin = reinterpret_cast<uint64_t>(base) & ~uint64_t{0xfff};
+    const auto end = begin + size;
+    if (end < begin)
+        return STATUS_INVALID_PARAMETER;
+
+    exclusive_lock lock{store->lock};
+    // Candidates: active user hooks of this process inside the range. A
+    // kernel hook is not a candidate - its page is not a per-process
+    // copy-on-write page. All candidates share the owner, so resolving the
+    // process once is enough; without a candidate there is nothing to do
+    // (this is the common case for the flood of unrelated VM calls).
+    PEPROCESS process{};
+    for (const auto& entry : store->entries) {
+        if (entry.active && entry.spec.domain == hook_domain::user &&
+            entry.spec.owner_pid == pid && entry.spec.target >= begin &&
+            entry.spec.target < end) {
+            process = entry.process;
+            break;
+        }
+    }
+    if (!process)
+        return STATUS_SUCCESS;
+
+    KAPC_STATE apc{};
+    KeStackAttachProcess(process, &apc);
+    for (auto& entry : store->entries) {
+        if (!entry.active || entry.spec.domain != hook_domain::user ||
+            entry.spec.owner_pid != pid || entry.spec.target < begin ||
+            entry.spec.target >= end)
+            continue;
+        // What does the virtual page map NOW? The copy made by the VM is
+        // already in place: this call is a post-hook.
+        auto* const page =
+            reinterpret_cast<void*>(entry.spec.target & ~uint64_t{0xfff});
+        page_lock fresh;
+        const auto status = fresh.acquire(page, UserMode, IoReadAccess);
+        if (!NT_SUCCESS(status)) {
+            // The range can be partially freed: leave the hook on its old
+            // page, it cannot run there either way.
+            continue;
+        }
+        const auto pfn = fresh.pfn();
+        if (!pfn || pfn == entry.spec.pfn)
+            continue;
+        // The page the hook armed is no longer the page the process
+        // executes. Move: same id, same patch, new backing page.
+        hv::remove(entry.spec.id);
+        entry.page.reset();
+        entry.page = static_cast<page_lock&&>(fresh);
+        entry.spec.pfn = pfn;
+        entry.spec.original = entry.page.data();
+        const auto rebound = hv::install(entry.spec);
+        if (rebound)
+            ++rebinds;
+        else
+            ++rebind_failures;
+    }
+    KeUnstackDetachProcess(&apc);
+    return STATUS_SUCCESS;
+}
+
 bool begin_hook_window(uint64_t id) {
     if (!store || !id)
         return false;

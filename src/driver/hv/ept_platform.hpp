@@ -11,6 +11,8 @@ void invalidate();
 void single_step(bool);
 uint64_t guest_cr3();
 uint64_t translate_user(uint64_t, uint64_t);
+// Mocked per test: copies out of a registered "physical page" table.
+void copy_from_physical(void* dst, uint64_t physical, size_t size);
 }
 #else
 #include "vmx.h"
@@ -30,5 +32,12 @@ inline void invalidate() {
 inline void single_step(bool enabled) { if (enabled) enable_monitor_trap_flag(); else disable_monitor_trap_flag(); }
 inline uint64_t guest_cr3() { return vmx_vmread(VMCS_GUEST_CR3); }
 inline uint64_t translate_user(uint64_t cr3, uint64_t address) { return hv::translate_user(cr3, address); }
+// Root-mode read of arbitrary guest memory: the host maps all physical memory
+// at host_physical_memory_base. The destination page is ours and the source
+// is guarded; a fault leaves the pre-zeroed destination untouched.
+inline void copy_from_physical(void* dst, uint64_t physical, size_t size) {
+    host_exception_info exception{};
+    memcpy_safe(exception, dst, host_physical_memory_base + physical, size);
+}
 }
 #endif

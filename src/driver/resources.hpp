@@ -56,6 +56,22 @@ class page_lock final {
     ~page_lock() { reset(); }
     page_lock(const page_lock&) = delete;
     page_lock& operator=(const page_lock&) = delete;
+    page_lock(page_lock&& other) noexcept {
+        mdl_ = other.mdl_;
+        mapping_ = other.mapping_;
+        other.mdl_ = nullptr;
+        other.mapping_ = nullptr;
+    }
+    page_lock& operator=(page_lock&& other) noexcept {
+        if (this != &other) {
+            reset();
+            mdl_ = other.mdl_;
+            mapping_ = other.mapping_;
+            other.mdl_ = nullptr;
+            other.mapping_ = nullptr;
+        }
+        return *this;
+    }
     [[nodiscard]] NTSTATUS acquire(void* page, KPROCESSOR_MODE mode,
                                    LOCK_OPERATION operation = IoReadAccess) {
         reset();

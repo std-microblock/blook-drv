@@ -90,6 +90,68 @@ size_t hook_index(const vcpu_ept_data& ept, uint64_t id) {
     return blook::max_hooks;
 }
 
+size_t watch_index(const vcpu_ept_data& ept, uint64_t id) {
+    for (size_t i = 0; i < blook::max_watches; ++i)
+        if (ept.watches[i].active && ept.watches[i].spec.id == id)
+            return i;
+    return blook::max_watches;
+}
+
+bool page_watched(const vcpu_ept_data& ept, uint64_t pfn) {
+    for (const auto& watch : ept.watches)
+        if (watch.active && watch.spec.pfn == pfn)
+            return true;
+    return false;
+}
+
+// A 2-MiB split stays only while something on it needs 4-KiB entries: a hook
+// group, a watch, or a permanent (MTRR) split. Callers run this after state
+// changes that may have removed the last user of the region.
+void reclaim_split_if_unused(vcpu_ept_data& ept, uint64_t pfn) {
+    for (const auto& group : ept.groups)
+        if (group.active && (group.pfn >> 9) == (pfn >> 9))
+            return;
+    for (const auto& watch : ept.watches)
+        if (watch.active && (watch.spec.pfn >> 9) == (pfn >> 9))
+            return;
+    for (size_t i = 0; i < ept_split_count; ++i)
+        if (!ept.permanent_split[i] && ept.split_owner[i] == (pfn >> 9)) {
+            ept.pds[pfn >> 18][(pfn >> 9) & 511].flags = ept.large_original[i];
+            ept.split_owner[i] = unused_split;
+        }
+}
+
+// The watch fired while it was still pending: copy the requested range out of
+// the guest's own address space. Root mode - no kernel API, no allocation,
+// and the buffer must be fully written before the record flips to hit, so a
+// fetch never reads a half-written dump.
+void run_watch_dump(vcpu_ept_data&, watch_slot& watch, uint64_t guest_rip) {
+    auto* record = watch.record;
+    if (!record || !record->buffer || !record->dump_size)
+        return;
+    const auto cr3 = platform::guest_cr3();
+    record->hit_rip = guest_rip;
+    record->hit_cr3 = cr3;
+    const uint64_t begin = record->dump_base;
+    const uint64_t end = begin + record->dump_size;
+    auto* const buffer = record->buffer;
+    for (uint64_t va = begin & ~uint64_t{0xfff}; va < end; va += 4096) {
+        const auto slice = va < begin ? begin : va;
+        const auto last = va + 4096 < end ? va + 4096 : end;
+        const size_t size = static_cast<size_t>(last - slice);
+        auto* const dst = buffer + (slice - begin);
+        memset(dst, 0, size);
+        const auto physical = platform::translate_user(cr3, slice);
+        if (!physical)
+            continue;
+        platform::copy_from_physical(dst, physical, size);
+    }
+    ++g_stats.watch_dumps;
+    // TSO ordering publishes every byte above ahead of the state word; a
+    // fetched dump is always complete.
+    record->state = blook::watch_hit;
+}
+
 blook::ept_view armed_view(const vcpu_ept_data& ept, uint64_t pfn) {
     return window_open(ept, pfn) ? blook::ept_view::window_execute
                                  : blook::ept_view::original_data;
@@ -234,11 +296,20 @@ void reset_ept_context(vcpu_ept_data& ept) {
             map(*get_ept_pte(ept, group.pfn << 12),
                 blook::select_view(armed_view(ept, group.pfn), group.pfn,
                                    group.shadow_pfn));
+    for (const auto& watch : ept.watches)
+        if (watch.active)
+            map(*get_ept_pte(ept, watch.spec.pfn << 12),
+                blook::select_view(blook::ept_view::original_data,
+                                   watch.spec.pfn, 0));
     invalidate();
 }
 
 bool install_ept_hook(vcpu_ept_data& ept, const blook::hook_spec& spec) {
     if (!blook::valid_patch(spec.target, spec.length))
+        return false;
+    // A watch owns this page's views (and vice versa): the two mechanisms
+    // never share one physical page.
+    if (page_watched(ept, spec.pfn))
         return false;
     size_t slot = blook::max_hooks;
     for (size_t i = 0; i < blook::max_hooks; ++i) {
@@ -341,20 +412,8 @@ void remove_ept_hook(vcpu_ept_data& ept, uint64_t id) {
                 ? blook::select_view(armed_view(ept, pfn), pfn, 0)
                 : blook::select_view(blook::ept_view::original_step, pfn, 0);
         map(*get_ept_pte(ept, pfn << 12), view);
-        // Reclaim a split only when every group sharing that 2-MiB range is
-        // gone.
-        bool in_use = false;
-        for (const auto& group : ept.groups)
-            if (group.active && (group.pfn >> 9) == (pfn >> 9))
-                in_use = true;
-        if (!in_use)
-            for (size_t i = 0; i < ept_split_count; ++i)
-                if (!ept.permanent_split[i] &&
-                    ept.split_owner[i] == (pfn >> 9)) {
-                    ept.pds[pfn >> 18][(pfn >> 9) & 511].flags =
-                        ept.large_original[i];
-                    ept.split_owner[i] = unused_split;
-                }
+        // Reclaim a split only when nothing on that 2-MiB range needs it.
+        reclaim_split_if_unused(ept, pfn);
     } else {
         // Siblings remain: the shadow loses the removed patch but keeps the
         // rest, and the page stays armed for them.
@@ -387,6 +446,57 @@ bool begin_ept_window(vcpu_ept_data& ept, uint64_t id) {
     return true;
 }
 
+bool install_ept_watch(vcpu_ept_data& ept, const blook::watch_spec& spec,
+                       blook::watch_record* record) {
+    if (!spec.pfn || !spec.id || !record)
+        return false;
+    // Hooks own this page's views: refuse a watch that would fight them.
+    if (page_hooked(ept, spec.pfn))
+        return false;
+    size_t slot = blook::max_watches;
+    for (size_t i = 0; i < blook::max_watches; ++i) {
+        const auto& watch = ept.watches[i];
+        if (watch.active) {
+            // One id is one watch, one page is one watch: two pending dumps
+            // must never disagree about what a fetch on the page means.
+            if (watch.spec.id == spec.id || watch.spec.pfn == spec.pfn)
+                return false;
+        } else if (slot == blook::max_watches) {
+            slot = i;
+        }
+    }
+    if (slot == blook::max_watches)
+        return false;
+    // Same rule as hooks: the page must be splittable before anything
+    // publishes the entry.
+    auto pte = get_ept_pte(ept, spec.pfn << 12, true);
+    if (!pte || pte->memory_type != MEMORY_TYPE_WRITE_BACK)
+        return false;
+    auto& watch = ept.watches[slot];
+    watch.spec = spec;
+    watch.record = record;
+    watch.active = true;
+    // The armed view: reads and writes flow to the original page, only the
+    // instruction fetch traps.
+    map(*pte, blook::select_view(blook::ept_view::original_data, spec.pfn, 0));
+    invalidate();
+    return true;
+}
+
+void remove_ept_watch(vcpu_ept_data& ept, uint64_t id) {
+    const auto index = watch_index(ept, id);
+    if (index == blook::max_watches)
+        return;
+    auto& watch = ept.watches[index];
+    const auto pfn = watch.spec.pfn;
+    watch.active = false;
+    watch.record = nullptr;
+    if (auto pte = get_ept_pte(ept, pfn << 12))
+        map(*pte, blook::select_view(blook::ept_view::original_step, pfn, 0));
+    reclaim_split_if_unused(ept, pfn);
+    invalidate();
+}
+
 bool end_ept_window(vcpu_ept_data& ept, uint64_t id) {
     const auto index = hook_index(ept, id);
     if (index == blook::max_hooks || !ept.window_depth[index])
@@ -408,8 +518,68 @@ void handle_page_access(vcpu_ept_data& ept, uint64_t physical, bool execute,
                         uint64_t guest_rip) {
     const auto pfn = physical >> 12;
     auto pte = get_ept_pte(ept, physical);
-    if (!pte || !page_hooked(ept, pfn))
+    if (!pte || (!page_hooked(ept, pfn) && !page_watched(ept, pfn)))
         fatal_root_error();
+    if (!page_hooked(ept, pfn)) {
+        // A watched page. Its armed view allows reads and writes, so the only
+        // violation possible here is the instruction fetch.
+        if (!execute)
+            fatal_root_error();
+        ++g_stats.watch_execute;
+        size_t slot = blook::max_watches;
+        for (size_t i = 0; i < blook::max_watches; ++i)
+            if (ept.watches[i].active && ept.watches[i].spec.pfn == pfn)
+                slot = i;
+        if (slot == blook::max_watches)
+            fatal_root_error();
+        auto& watch = ept.watches[slot];
+        auto* record = watch.record;
+        // Fire only on an exact hit of the watched address in the owning
+        // address space - the same PEB-identity test the user hooks run.
+        if (record && guest_rip == watch.spec.target &&
+            record->state == blook::watch_pending) {
+            const auto identity =
+                platform::translate_user(platform::guest_cr3(),
+                                         watch.spec.identity_address) >>
+                12;
+            if (identity && identity == watch.spec.address_space) {
+                run_watch_dump(ept, watch, guest_rip);
+            } else if (!identity) {
+                ++g_stats.identity_failed;
+            } else {
+                ++g_stats.identity_mismatch;
+            }
+        }
+        if (record && record->state == blook::watch_hit) {
+            // The dump exists (made just now, or earlier on another
+            // processor): this processor is done with the page. The driver
+            // drops the registration; the record stays for fetching.
+            watch.active = false;
+            watch.record = nullptr;
+            map(*pte,
+                blook::select_view(blook::ept_view::original_step, pfn, 0));
+            reclaim_split_if_unused(ept, pfn);
+            invalidate();
+            return;
+        }
+        // A neighbouring instruction on the page, or a different address
+        // space: execute one instruction from the untouched page, then the
+        // MTF exit re-arms the trap.
+        ++g_stats.watch_skips;
+        map(*pte, blook::select_view(blook::ept_view::original_step, pfn, 0));
+        if (ept.temporary_count < blook::max_hooks) {
+            bool known = false;
+            for (size_t i = 0; i < ept.temporary_count; ++i)
+                if (ept.temporary[i] == pte)
+                    known = true;
+            if (!known) {
+                ept.temporary[ept.temporary_count++] = pte;
+                platform::single_step(true);
+            }
+        }
+        invalidate();
+        return;
+    }
     if (execute) {
         ++g_stats.execute_violations;
         for (size_t h = 0; h < blook::max_hooks && h < hook_diag_slots; ++h)

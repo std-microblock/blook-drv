@@ -24,6 +24,9 @@ NTSTATUS activate() {
     return STATUS_SUCCESS;
 }
 
+NTSTATUS activate_maintenance() { return nt::install_core(); }
+void deactivate_maintenance() { nt::remove_core(); }
+
 void deactivate() {
     exclusive_lock guard{profile_lock};
     win32k::remove();

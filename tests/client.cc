@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "ipc/protocol.hpp"
+#include "policy/hook.hpp"
 #include "support.hpp"
 
 // Only the device boundary is faked. No driver is opened and no IOCTL reaches
@@ -22,6 +23,10 @@ inline bool fail_call{};
 inline bool short_response{};
 inline unsigned calls{};
 inline HANDLE last_handle{};
+inline ipc::WatchRequest last_watch{};
+// What the fake driver hands out as a finished dump.
+inline std::array<std::uint8_t, 8> dump_bytes{0x30, 0x31, 0x32, 0x33,
+                                              0x34, 0x35, 0x36, 0x37};
 HANDLE WINAPI open(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD,
                    HANDLE) {
     if (fail_open) {
@@ -31,7 +36,7 @@ HANDLE WINAPI open(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD,
     last_handle = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     return last_handle;
 }
-BOOL WINAPI control(HANDLE, DWORD code, LPVOID, DWORD, LPVOID output,
+BOOL WINAPI control(HANDLE, DWORD code, LPVOID input, DWORD, LPVOID output,
                     DWORD size, LPDWORD returned, LPOVERLAPPED) {
     ++calls;
     if (fail_call) {
@@ -46,6 +51,34 @@ BOOL WINAPI control(HANDLE, DWORD code, LPVOID, DWORD, LPVOID output,
     if (code == ipc::IOCTL_BLOOK_INSTALL &&
         size == sizeof(ipc::InstallResponse)) {
         const ipc::InstallResponse made{.id = 0xabc};
+        std::memcpy(output, &made, sizeof(made));
+    }
+    if (code == ipc::IOCTL_BLOOK_WATCH && input &&
+        size == sizeof(ipc::WatchResponse)) {
+        const auto* request = static_cast<const ipc::WatchRequest*>(input);
+        if (request->action == ipc::watch_arm) {
+            last_watch = *request;
+            const ipc::WatchResponse made{.id = 0xdef};
+            std::memcpy(output, &made, sizeof(made));
+        }
+    }
+    if (code == ipc::IOCTL_BLOOK_DUMP && input &&
+        size == sizeof(ipc::DumpResponse)) {
+        const auto* request = static_cast<const ipc::DumpRequest*>(input);
+        ipc::DumpResponse made{};
+        made.state = blook::watch_hit;
+        made.total = dump_bytes.size();
+        made.hit_rip = 0x1234;
+        made.hit_cr3 = 1;
+        if (request->offset < dump_bytes.size()) {
+            const auto available =
+                dump_bytes.size() - request->offset;
+            const auto take = request->length < available
+                                  ? request->length
+                                  : static_cast<uint32_t>(available);
+            std::memcpy(made.data, dump_bytes.data() + request->offset, take);
+            made.copied = take;
+        }
         std::memcpy(output, &made, sizeof(made));
     }
     *returned = short_response && size ? size - 1 : size;
@@ -204,6 +237,74 @@ int main() {
                         fake::calls == 1,
                     "valid patch issues one ioctl");
     }
+    // The watch API: arm (absolute and module-relative), poll, chunked and
+    // full dump, disarm on destruction.
+    {
+        auto opened = session::open(open_mode::read_only);
+        test::check(opened.has_value(), "open session for watch tests");
+        fake::calls = 0;
+        auto armed = opened->watch_execute(
+            reinterpret_cast<void*>(std::uintptr_t{0x700080}),
+            reinterpret_cast<void*>(std::uintptr_t{0x710000}), 0x1020,
+            pid{1234});
+        test::check(armed && armed->id() == 0xdef && fake::calls == 1,
+                    "absolute watch arm issues one ioctl");
+        test::check(fake::last_watch.action == ipc::watch_arm &&
+                        fake::last_watch.pid == 1234 &&
+                        fake::last_watch.address == 0x700080 &&
+                        fake::last_watch.base == 0 &&
+                        fake::last_watch.dump_base == 0x710000 &&
+                        fake::last_watch.dump_size == 0x1020,
+                    "arm request carries absolute VAs");
+        const auto via_module = opened->watch_execute_at(
+            reinterpret_cast<void*>(std::uintptr_t{0x10000000}), 0x80, 0x1000,
+            4096, pid{42});
+        test::check(via_module && fake::last_watch.base == 0x10000000 &&
+                        fake::last_watch.address == 0x80 &&
+                        fake::last_watch.dump_base == 0x1000 &&
+                        fake::last_watch.pid == 42,
+                    "module-relative arm keeps base + offsets");
+        test::check(
+            denied(opened->watch_execute(nullptr,
+                                         reinterpret_cast<void*>(
+                                             std::uintptr_t{0x710000}),
+                                         0x1020, pid{1}),
+                   ERROR_INVALID_PARAMETER),
+            "null address rejected client-side");
+        test::check(
+            denied(opened->watch_execute(
+                       reinterpret_cast<void*>(std::uintptr_t{0x700080}),
+                       reinterpret_cast<void*>(std::uintptr_t{0x710000}),
+                       blook::max_dump + 1, pid{1}),
+                   ERROR_INVALID_PARAMETER),
+            "oversized dump rejected client-side");
+
+        const auto hit = armed->poll();
+        test::check(hit && hit->ready && hit->rip == 0x1234 &&
+                        hit->cr3 == 1 && hit->total == fake::dump_bytes.size(),
+                    "poll reports the hit");
+        std::array<std::byte, 3> slice{};
+        const auto piece = armed->read(2, slice);
+        test::check(piece && *piece == 3 &&
+                        slice[0] == std::byte{fake::dump_bytes[2]} &&
+                        slice[2] == std::byte{fake::dump_bytes[4]},
+                    "chunked read maps offsets");
+        const auto full = armed->dump();
+        test::check(full && full->size() == fake::dump_bytes.size() &&
+                        std::memcmp(full->data(), fake::dump_bytes.data(),
+                                    full->size()) == 0,
+                    "full dump reassembles chunks");
+
+        // The RAII tail: moved-from handles are inert, destruction disarms.
+        auto moved_watch = std::move(*armed);
+        test::check(armed->id() == 0 && !*armed &&
+                        armed->disarm().has_value(),
+                    "moved-from watch is inert");
+        test::check(moved_watch.disarm().has_value() &&
+                        moved_watch.id() == 0,
+                    "disarm clears the handle");
+    }
+
     test::check(!valid(connection_handle),
                 "session destruction closes connection");
     detail::connection unopened;

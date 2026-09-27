@@ -268,4 +268,27 @@ void remove(uint64_t id) {
         if (vmx_vmcall(input) != 1) KeBugCheckEx(DRIVER_CORRUPTED_EXPOOL, 0x424d, i, id, 0);
     }
 }
+bool install_watch(const blook::watch_spec& spec, blook::watch_record* record) {
+    if (!ghv.running) return false;
+    for (ULONG i = 0; i < ghv.vcpu_count; ++i) {
+        affinity_guard affinity{i};
+        hypercall_input input{operation::watch_install};
+        input.args[0] = reinterpret_cast<uint64_t>(&spec);
+        input.args[1] = reinterpret_cast<uint64_t>(record);
+        if (!vmx_vmcall(input)) {
+            // Roll back the CPUs already armed, mirroring install().
+            remove_watch(spec.id);
+            return false;
+        }
+    }
+    return true;
+}
+void remove_watch(uint64_t id) {
+    if (!ghv.running) return;
+    for (ULONG i = 0; i < ghv.vcpu_count; ++i) {
+        affinity_guard affinity{i};
+        hypercall_input input{operation::watch_remove}; input.args[0] = id;
+        if (vmx_vmcall(input) != 1) KeBugCheckEx(DRIVER_CORRUPTED_EXPOOL, 0x424c, i, id, 0);
+    }
+}
 }

@@ -24,9 +24,13 @@ role classify_ascii(std::string_view name) {
 }  // namespace
 
 void test_ept_engine();
+void test_ept_jit_resync();
+void test_ept_watch();
 
 int main() {
     test_ept_engine();
+    test_ept_jit_resync();
+    test_ept_watch();
 
     // The policy has to recognise the same images the previous implementation
     // did, and it must not depend on the path the sample was started from.

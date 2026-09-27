@@ -162,6 +162,11 @@ void stop();
 [[nodiscard]] bool install(const blook::hook_spec& spec);
 void remove(uint64_t id);
 void refresh(uint64_t id);
+// Execute watches: same per-processor broadcast as install/remove. `record`
+// is the shared dump record root mode fills on a hit.
+[[nodiscard]] bool install_watch(const blook::watch_spec& spec,
+                                 blook::watch_record* record);
+void remove_watch(uint64_t id);
 // Call-original window. These deliberately do NOT broadcast: a window is only
 // meaningful on the logical processor that is running the hook handler, and
 // the promise is "the page the handler is about to call into is unpatched on

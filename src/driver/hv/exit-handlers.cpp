@@ -188,6 +188,16 @@ void emulate_vmcall(vcpu* const cpu) {
     case operation::remove: remove_ept_hook(cpu->ept, cpu->ctx->rcx); cpu->ctx->rax = 1; break;
     case operation::window_begin: cpu->ctx->rax = begin_ept_window(cpu->ept, cpu->ctx->rcx); break;
     case operation::window_end: cpu->ctx->rax = end_ept_window(cpu->ept, cpu->ctx->rcx); break;
+    case operation::watch_install: {
+      auto spec = reinterpret_cast<const blook::watch_spec*>(cpu->ctx->rcx);
+      auto record = reinterpret_cast<blook::watch_record*>(cpu->ctx->rdx);
+      // Same kernel-pointer sanity gate as the hook install above.
+      if (reinterpret_cast<uint64_t>(spec) < 0xffff800000000000ull ||
+          reinterpret_cast<uint64_t>(record) < 0xffff800000000000ull) break;
+      cpu->ctx->rax = install_ept_watch(cpu->ept, *spec, record);
+      break;
+    }
+    case operation::watch_remove: remove_ept_watch(cpu->ept, cpu->ctx->rcx); cpu->ctx->rax = 1; break;
     default: inject_hw_exception(invalid_opcode); return;
   }
   skip_instruction();

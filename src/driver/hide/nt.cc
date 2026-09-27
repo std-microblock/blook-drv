@@ -5,6 +5,7 @@
 
 #include "driver/hooks.hpp"
 #include "driver/resources.hpp"
+#include "driver/watch.hpp"
 #include "driver/hide/nt_types.hpp"
 #include "driver/hide/peb.hpp"
 #include "driver/hide/roles.hpp"
@@ -26,6 +27,8 @@ using open_thread_t = NTSTATUS (*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES,
                                    PCLIENT_ID);
 using debug_active_process_t = NTSTATUS (*)(HANDLE, HANDLE);
 using write_virtual_memory_t = NTSTATUS (*)(HANDLE, PVOID, PVOID, SIZE_T, PSIZE_T);
+using protect_virtual_memory_t = NTSTATUS (*)(HANDLE, PVOID*, PSIZE_T, ULONG,
+                                              PULONG);
 
 
 // A hooked service: the id is what the handler hands to the call-original
@@ -45,6 +48,7 @@ service<open_process_t> open_process;
 service<open_thread_t> open_thread;
 service<debug_active_process_t> debug_active_process;
 service<write_virtual_memory_t> write_virtual_memory;
+service<protect_virtual_memory_t> protect_virtual_memory;
 
 // Scoped call-original window. While it is alive the hooked page exposes the
 // untouched original on this processor, so `original` can be called directly.
@@ -169,6 +173,26 @@ flag_patch neutralise_flag_byte(HANDLE process_handle, PVOID base, PVOID buffer,
     return result;
 }
 
+// The memory hooks run for every process in the system, so resolving the
+// process a handle names has to tolerate the pseudo-handle a process uses for
+// itself along the real ones.
+bool process_of_handle(HANDLE process_handle, PEPROCESS& process) {
+    process = nullptr;
+    if (process_handle == NtCurrentProcess()) {
+        process = PsGetCurrentProcess();
+        ObReferenceObject(process);
+        return true;
+    }
+    return NT_SUCCESS(ObReferenceObjectByHandle(
+        process_handle, 0, *PsProcessType, ExGetPreviousMode(),
+        reinterpret_cast<PVOID*>(&process), nullptr));
+}
+
+uint32_t pid_of(PEPROCESS process) {
+    return static_cast<uint32_t>(
+        reinterpret_cast<uintptr_t>(PsGetProcessId(process)));
+}
+
 NTSTATUS hook_write_virtual_memory(HANDLE process_handle, PVOID base, PVOID buffer,
                                    SIZE_T size, PSIZE_T written) {
     flag_patch patch;
@@ -181,6 +205,58 @@ NTSTATUS hook_write_virtual_memory(HANDLE process_handle, PVOID base, PVOID buff
         __except (EXCEPTION_EXECUTE_HANDLER) {
         }
     }
+    // A cross-process write to shared image pages copy-on-writes them in the
+    // TARGET: the virtual page silently moves to a fresh private page and any
+    // EPT hook still armed on the old physical page never faults again.
+    if (NT_SUCCESS(status) && base && size) {
+        PEPROCESS process{};
+        if (process_of_handle(process_handle, process)) {
+            const auto begin =
+                reinterpret_cast<uint64_t>(base) & ~uint64_t{0xfff};
+            (void)rebind_hooks_if_copied(pid_of(process), base, size);
+            watch::rebind_if_copied(process, begin, begin + size);
+            ObDereferenceObject(process);
+        }
+    }
+    return status;
+}
+
+// NtProtectVirtualMemory
+//
+// This is the main copy-on-write gate: image sections are shared until their
+// protection becomes writable, and the VM privatizes them inside exactly this
+// call (classic self-decrypting shells: VirtualProtect(RWX) -> decrypt ->
+// jump). When the first instruction of the plain code runs, its virtual page
+// no longer maps the physical page the hook armed.
+NTSTATUS hook_protect_virtual_memory(HANDLE process_handle, PVOID* base,
+                                     PSIZE_T size, ULONG new_protection,
+                                     PULONG old_protection) {
+    const auto status =
+        call_original(protect_virtual_memory, process_handle, base, size,
+                      new_protection, old_protection);
+    if (!NT_SUCCESS(status))
+        return status;
+    PEPROCESS process{};
+    if (!process_of_handle(process_handle, process))
+        return status;
+    // On success the service reports the page-aligned range it changed.
+    PVOID aligned_base{};
+    SIZE_T aligned_size{};
+    __try {
+        aligned_base = *base;
+        aligned_size = *size;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        aligned_base = nullptr;
+        aligned_size = 0;
+    }
+    if (aligned_base && aligned_size) {
+        const auto begin =
+            reinterpret_cast<uint64_t>(aligned_base) & ~uint64_t{0xfff};
+        (void)rebind_hooks_if_copied(pid_of(process), aligned_base,
+                                     aligned_size);
+        watch::rebind_if_copied(process, begin, begin + aligned_size);
+    }
+    ObDereferenceObject(process);
     return status;
 }
 
@@ -586,7 +662,9 @@ struct install_entry {
     void* handler;
 };
 
-install_entry entries[] = {
+// The anti-anti-debug profile. These handlers adjust what the sample
+// observes; nothing in them maintains the hook machinery itself.
+install_entry profile_entries[] = {
     {&query_system_information.id,
      reinterpret_cast<void**>(&query_system_information.original),
      L"NtQuerySystemInformation",
@@ -614,6 +692,18 @@ install_entry entries[] = {
      reinterpret_cast<void**>(&debug_active_process.original),
      L"NtDebugActiveProcess",
      reinterpret_cast<void*>(&hook_debug_active_process)},
+};
+
+// Core VM hooks: always on while the hypervisor runs, independent of the
+// profile. Their handlers re-arm session hooks whose virtual pages were
+// re-backed by copy-on-write (plus the write-side PEB scrub that has always
+// lived on NtWriteVirtualMemory). Without them every hook on an image page
+// dies silently the moment the page is made writable or written remotely.
+install_entry core_entries[] = {
+    {&protect_virtual_memory.id,
+     reinterpret_cast<void**>(&protect_virtual_memory.original),
+     L"NtProtectVirtualMemory",
+     reinterpret_cast<void*>(&hook_protect_virtual_memory)},
     {&write_virtual_memory.id,
      reinterpret_cast<void**>(&write_virtual_memory.original),
      L"NtWriteVirtualMemory", reinterpret_cast<void*>(&hook_write_virtual_memory)},
@@ -628,23 +718,31 @@ void forget_process(ULONG pid) {
 }
 
 bool installed() {
-    for (const auto& entry : entries)
+    for (const auto& entry : profile_entries)
         if (*entry.id)
             return true;
     return false;
 }
 
-NTSTATUS install() {
+bool core_installed() {
+    for (const auto& entry : core_entries)
+        if (*entry.id)
+            return true;
+    return false;
+}
+
+NTSTATUS install_table(install_entry* table, uint32_t entry_count,
+                       const wchar_t* mask_value) {
     uint32_t count = 0;
-    for (uint32_t index = 0; index < sizeof(entries) / sizeof(entries[0]); ++index) {
-        auto& entry = entries[index];
+    for (uint32_t index = 0; index < entry_count; ++index) {
+        auto& entry = table[index];
         if (*entry.id) {
             ++count;
             continue;
         }
-        // Bring-up knob (see service_mask_allows): HookMask selects which
+        // Bring-up knob (see service_mask_allows): the mask selects which
         // services this pass may arm.
-        if (!service_mask_allows(L"HookMask", index)) {
+        if (!service_mask_allows(mask_value, index)) {
             blook::bringup_write("install: masked out, index", index, true);
             continue;
         }
@@ -694,13 +792,45 @@ NTSTATUS install() {
     return count ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
 }
 
-void remove() {
-    for (auto& entry : entries) {
+void remove_table(install_entry* table, uint32_t entry_count) {
+    for (uint32_t index = 0; index < entry_count; ++index) {
+        auto& entry = table[index];
         if (!*entry.id)
             continue;
         remove_hook(*entry.id);
         *entry.id = 0;
         *entry.original = nullptr;
     }
+}
+
+NTSTATUS install_core() {
+    if (core_installed())
+        return STATUS_SUCCESS;
+    return install_table(core_entries,
+                         sizeof(core_entries) / sizeof(core_entries[0]),
+                         L"CoreHookMask");
+}
+
+void remove_core() {
+    remove_table(core_entries, sizeof(core_entries) / sizeof(core_entries[0]));
+}
+
+NTSTATUS install() {
+    // The profile and the core VM hooks are independent, but activating the
+    // profile implies the machine is up - make sure the core is in too.
+    auto status = install_core();
+    if (!NT_SUCCESS(status))
+        return status;
+    return install_table(profile_entries,
+                         sizeof(profile_entries) / sizeof(profile_entries[0]),
+                         L"HookMask");
+}
+
+void remove() {
+    // Profile only: the core VM hooks stay armed as long as the hypervisor
+    // does, so session hooks keep their copy-on-write rebind with the
+    // profile off.
+    remove_table(profile_entries,
+                 sizeof(profile_entries) / sizeof(profile_entries[0]));
 }
 }  // namespace blook::hide::nt

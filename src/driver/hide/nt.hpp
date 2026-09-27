@@ -9,6 +9,13 @@ NTSTATUS install();
 void remove();
 [[nodiscard]] bool installed();
 
+// Core VM hooks (NtProtectVirtualMemory, NtWriteVirtualMemory), independent
+// of the profile: they keep session hooks alive across copy-on-write by
+// re-arming a hook whose virtual page changed its physical backing. Installed
+// while the hypervisor runs, removed only before it stops.
+NTSTATUS install_core();
+void remove_core();
+
 // Drop the one-shot scrub bookkeeping for a process that is going away, so a
 // recycled PID still gets its PEB cleared.
 void forget_process(ULONG pid);

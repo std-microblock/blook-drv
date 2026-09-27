@@ -7,6 +7,7 @@
 #include "driver/hooks.hpp"
 #include "driver/hv/hv.h"
 #include "driver/resources.hpp"
+#include "driver/watch.hpp"
 
 namespace blook {
 namespace {
@@ -43,6 +44,7 @@ void revoke(session& value, bool exiting) {
     // Diagnostic handles opened beside an active SDK session must be harmless
     // to close; conversely, this session's remote-target hooks must go too.
     revoke_session(value.token);
+    watch::revoke_session(value.token);
 }
 
 void process_notify(PEPROCESS process, HANDLE, PPS_CREATE_NOTIFY_INFO info) {
@@ -60,6 +62,7 @@ void process_notify(PEPROCESS process, HANDLE, PPS_CREATE_NOTIFY_INFO info) {
     }
     // A dead PID must not stay pinned to a role or keep its hooks alive.
     revoke_process(pid);
+    watch::revoke_process(pid);
     hide::unpin(pid);
     hide::forget_process(pid);
 }
@@ -117,6 +120,11 @@ NTSTATUS initialize_sessions() {
         shutdown_sessions();
         return status;
     }
+    status = watch::initialize();
+    if (!NT_SUCCESS(status)) {
+        shutdown_sessions();
+        return status;
+    }
     status = PsSetCreateProcessNotifyRoutineEx(process_notify, FALSE);
     if (!NT_SUCCESS(status)) {
         shutdown_sessions();
@@ -150,6 +158,12 @@ NTSTATUS initialize_sessions() {
         exclusive_lock lock{manager->lock};
         manager->backend_status = hv::start();
         status = manager->backend_status;
+        // Core VM hooks: with the hypervisor running, session hooks can now
+        // survive copy-on-write. A failure here is logged inside the install
+        // but does not take the device down - hooks simply keep the old
+        // behaviour.
+        if (NT_SUCCESS(status))
+            (void)hide::activate_maintenance();
     }
     if (!NT_SUCCESS(status))
         shutdown_sessions();
@@ -165,6 +179,9 @@ void shutdown_sessions() {
     }
     // Remove the profile hooks while the hypervisor is still able to unpatch.
     hide::deactivate();
+    // The core VM hooks outlive the profile (they serve plain session hooks),
+    // but they must be gone before the hypervisor stops.
+    hide::deactivate_maintenance();
     if (manager->power_callback)
         ExUnregisterCallback(manager->power_callback);
     if (manager->process_callback)
@@ -175,6 +192,7 @@ void shutdown_sessions() {
         exclusive_lock lock{manager->lock};
         hv::stop();
         shutdown_hooks();
+        watch::shutdown();
         NT_ASSERT(IsListEmpty(&manager->sessions));
     }
     if (manager->processor_callback)
@@ -440,6 +458,69 @@ NTSTATUS control_session(PIRP irp, PIO_STACK_LOCATION stack) {
                 default:
                     return STATUS_INVALID_PARAMETER;
             }
+        }
+        case ipc::IOCTL_BLOOK_WATCH: {
+            if (!value->enabled)
+                return STATUS_ACCESS_DENIED;
+            if (input != sizeof(ipc::WatchRequest))
+                return STATUS_BUFFER_TOO_SMALL;
+            // METHOD_BUFFERED: the request can be overwritten by the
+            // response, so copy it out first (same reason PROBE does).
+            const auto request = *static_cast<ipc::WatchRequest*>(buffer);
+            if (!ipc::valid_header(request))
+                return STATUS_REVISION_MISMATCH;
+            // Disarm sends no output buffer at all.
+            if (request.action == ipc::watch_disarm)
+                return watch::disarm(request.id, value->token);
+            if (request.action != ipc::watch_arm)
+                return STATUS_INVALID_PARAMETER;
+            if (output < sizeof(ipc::WatchResponse))
+                return STATUS_BUFFER_TOO_SMALL;
+            // base + rva addressing: with a non-zero base the two VA fields
+            // are offsets from it (a module the caller knows by base).
+            const auto address = request.base + request.address;
+            const auto dump_base = request.base + request.dump_base;
+            const auto target_pid = request.pid ? request.pid : value->pid;
+            uint64_t id{};
+            const auto status =
+                watch::arm(target_pid, value->token, address, dump_base,
+                           request.dump_size, id);
+            if (NT_SUCCESS(status)) {
+                *static_cast<ipc::WatchResponse*>(buffer) = {id};
+                irp->IoStatus.Information = sizeof(ipc::WatchResponse);
+            }
+            return status;
+        }
+        case ipc::IOCTL_BLOOK_DUMP: {
+            if (!value->enabled)
+                return STATUS_ACCESS_DENIED;
+            if (input != sizeof(ipc::DumpRequest) ||
+                output < sizeof(ipc::DumpResponse))
+                return STATUS_BUFFER_TOO_SMALL;
+            const auto request = *static_cast<ipc::DumpRequest*>(buffer);
+            if (!ipc::valid_header(request) || request.reserved)
+                return STATUS_INVALID_PARAMETER;
+            if (request.length > ipc::dump_chunk_size)
+                return STATUS_INVALID_PARAMETER;
+            auto* out = static_cast<ipc::DumpResponse*>(buffer);
+            // Zero before fetch: the payload lands in out->data and the
+            // header fields are set around it afterwards.
+            RtlZeroMemory(out, sizeof(*out));
+            watch::fetch_result fetched{};
+            const auto status =
+                watch::fetch(request.id, value->token, request.offset,
+                             out->data, request.length, fetched);
+            if (!NT_SUCCESS(status))
+                return status;
+            out->header.version = ipc::abi_version;
+            out->header.size = sizeof(ipc::DumpResponse);
+            out->state = fetched.state;
+            out->copied = fetched.copied;
+            out->total = fetched.total;
+            out->hit_rip = fetched.hit_rip;
+            out->hit_cr3 = fetched.hit_cr3;
+            irp->IoStatus.Information = sizeof(ipc::DumpResponse);
+            return status;
         }
         case ipc::IOCTL_BLOOK_SCRUB: {
             if (!value->enabled)

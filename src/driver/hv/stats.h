@@ -47,6 +47,12 @@ struct hook_stats {
     // execute is the only state that can trap an instruction fetch.
     volatile long long armed_entries_verified{};
     volatile long long armed_entries_wrong{};
+
+    // Execute watches (dump-on-execute): faults on watched pages, completed
+    // dumps, and faults that were not the watched address (single-stepped).
+    volatile long long watch_execute{};
+    volatile long long watch_dumps{};
+    volatile long long watch_skips{};
 };
 
 // What the hypervisor armed, per hook slot, plus how often a fetch of that page

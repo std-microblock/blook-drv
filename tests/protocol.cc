@@ -18,7 +18,8 @@ static_assert(
     wire_value_types<ipc::Header, ipc::PingRequest, ipc::PingResponse,
                      ipc::VersionInfo, ipc::EnableRequest, ipc::InstallRequest,
                      ipc::InstallResponse, ipc::HookRequest, ipc::HideRequest,
-                     ipc::ScrubRequest, ipc::QueryResponse>);
+                     ipc::ScrubRequest, ipc::QueryResponse, ipc::WatchRequest,
+                     ipc::WatchResponse, ipc::DumpRequest, ipc::DumpResponse>);
 
 template <class T>
 concept HasFactory = requires {
@@ -39,9 +40,10 @@ constexpr bool rejected_types =
     ((!HasFactory<Ts> && !HasHeaderValidator<Ts>) && ...);
 static_assert(
     rejected_types<int, ipc::Header, ipc::PingResponse, ipc::VersionInfo,
-                   ipc::InstallResponse, ipc::QueryResponse, HeaderLookalike,
-                   DerivedRequest, const ipc::PingRequest,
-                   volatile ipc::PingRequest, ipc::PingRequest&>);
+                   ipc::InstallResponse, ipc::QueryResponse, ipc::WatchResponse,
+                   ipc::DumpResponse, HeaderLookalike, DerivedRequest,
+                   const ipc::PingRequest, volatile ipc::PingRequest,
+                   ipc::PingRequest&>);
 
 constexpr bool initialized_fields(const ipc::PingRequest& value) {
     return value.magic == 0;
@@ -68,12 +70,21 @@ constexpr bool initialized_fields(const ipc::HideRequest& value) {
 constexpr bool initialized_fields(const ipc::ScrubRequest& value) {
     return value.pid == 0 && value.flags == 0;
 }
+constexpr bool initialized_fields(const ipc::WatchRequest& value) {
+    return value.address == 0 && value.base == 0 && value.dump_base == 0 &&
+           value.dump_size == 0 && value.id == 0 && value.pid == 0 &&
+           value.action == 0;
+}
+constexpr bool initialized_fields(const ipc::DumpRequest& value) {
+    return value.id == 0 && value.offset == 0 && value.length == 0 &&
+           value.reserved == 0;
+}
 
 template <ipc::WireRequest T>
 constexpr bool factory_contract() {
     const auto value = ipc::request<T>();
     return HasFactory<T> && HasHeaderValidator<T> &&
-           value.header.version == 4 && value.header.size == sizeof(T) &&
+           value.header.version == 5 && value.header.size == sizeof(T) &&
            ipc::valid_header(value) && initialized_fields(value);
 }
 static_assert(factory_contract<ipc::PingRequest>());
@@ -82,8 +93,10 @@ static_assert(factory_contract<ipc::InstallRequest>());
 static_assert(factory_contract<ipc::HookRequest>());
 static_assert(factory_contract<ipc::HideRequest>());
 static_assert(factory_contract<ipc::ScrubRequest>());
+static_assert(factory_contract<ipc::WatchRequest>());
+static_assert(factory_contract<ipc::DumpRequest>());
 
-static_assert(ipc::abi_version == 4);
+static_assert(ipc::abi_version == 5);
 static_assert(ipc::PingRequest::kMagic == 0x424c4f4b);
 static_assert(ipc::PingResponse::kMagic == 0x4b4f4c42);
 static_assert(ipc::PingResponse::kStatusOk == 0);
@@ -95,13 +108,16 @@ static_assert(ipc::hide_role_tool == 1 && ipc::hide_role_target == 2);
 static_assert(ipc::hide_windows_on == 4 && ipc::hide_windows_off == 5);
 static_assert(ipc::scrub_peb == 1 && ipc::scrub_heap == 2 &&
               ipc::scrub_all == 3);
+static_assert(ipc::watch_arm == 1 && ipc::watch_disarm == 2);
 
 constexpr std::array ioctls{
     ipc::IOCTL_BLOOK_PING,   ipc::IOCTL_BLOOK_GET_VERSION,
     ipc::IOCTL_BLOOK_ENABLE, ipc::IOCTL_BLOOK_INSTALL,
     ipc::IOCTL_BLOOK_REMOVE, ipc::IOCTL_BLOOK_REFRESH,
     ipc::IOCTL_BLOOK_QUERY,  ipc::IOCTL_BLOOK_HIDE,
-    ipc::IOCTL_BLOOK_SCRUB,
+    ipc::IOCTL_BLOOK_SCRUB,  ipc::IOCTL_BLOOK_STATS,
+    ipc::IOCTL_BLOOK_PROBE,  ipc::IOCTL_BLOOK_WATCH,
+    ipc::IOCTL_BLOOK_DUMP,
 };
 constexpr bool ioctl_contract() {
     for (std::size_t i = 0; i < ioctls.size(); ++i) {
@@ -121,7 +137,7 @@ static_assert(ioctl_contract());
 template <ipc::WireRequest T>
 void test_request() {
     auto value = ipc::request<T>();
-    test::check(value.header.version == 4, "factory initializes ABI v4");
+    test::check(value.header.version == 5, "factory initializes ABI v5");
     test::check(value.header.size == sizeof(T),
                 "factory initializes exact wire size");
     test::check(ipc::valid_header(value), "factory produces a valid header");
@@ -130,7 +146,7 @@ void test_request() {
                 "factory initializes all payload fields");
     test::check(!ipc::valid_header(T{}), "default request lacks wire size");
 
-    for (const uint32_t version : {0u, 3u, 5u, 0xffffffffu}) {
+    for (const uint32_t version : {0u, 3u, 4u, 6u, 0xffffffffu}) {
         value = ipc::request<T>();
         value.header.version = version;
         test::check(!ipc::valid_header(value),
@@ -153,7 +169,7 @@ void test_request() {
 
 void test_response_initialization() {
     const ipc::Header header{};
-    test::check(header.version == 4 && header.size == 0,
+    test::check(header.version == 5 && header.size == 0,
                 "header member defaults");
     const ipc::PingResponse ping{};
     test::check(ping.magic == 0 && ping.status == 0,
@@ -196,6 +212,8 @@ int main() {
     test_request<ipc::HookRequest>();
     test_request<ipc::HideRequest>();
     test_request<ipc::ScrubRequest>();
+    test_request<ipc::WatchRequest>();
+    test_request<ipc::DumpRequest>();
     test_response_initialization();
     test_ioctls();
     return test::finish();

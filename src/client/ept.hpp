@@ -14,6 +14,7 @@
 #include <system_error>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include "client/handle.hpp"
 #include "ipc/protocol.hpp"
@@ -179,6 +180,139 @@ class hook final {
     }
 };
 
+// What `watch::poll` / `watch::dump` report once the watched address has been
+// executed: the same fields the hypervisor publishes in the record.
+struct watch_hit {
+    uint64_t rip{};
+    uint64_t cr3{};
+    uint64_t total{};
+    bool ready{};
+};
+
+// An armed execute watch. Move-only; destroying the last handle disarms it in
+// the driver. The watch is one-shot: once `poll().ready` is true the dump
+// stays fetchable for the lifetime of the handle.
+class watch final {
+    std::shared_ptr<detail::connection> connection_;
+    uint64_t id_{};
+
+   public:
+    watch(std::shared_ptr<detail::connection> connection, uint64_t id) noexcept
+        : connection_(std::move(connection)), id_(id) {}
+    watch(const watch&) = delete;
+    watch& operator=(const watch&) = delete;
+    watch(watch&& other) noexcept
+        : connection_(std::move(other.connection_)),
+          id_(std::exchange(other.id_, 0)) {}
+    watch& operator=(watch&& other) noexcept {
+        if (this != &other) {
+            (void)disarm();
+            connection_ = std::move(other.connection_);
+            id_ = std::exchange(other.id_, 0);
+        }
+        return *this;
+    }
+    ~watch() { (void)disarm(); }
+
+    [[nodiscard]] uint64_t id() const noexcept { return id_; }
+    [[nodiscard]] explicit operator bool() const noexcept { return id_ != 0; }
+
+    [[nodiscard]] result<void> disarm() noexcept {
+        if (!id_)
+            return {};
+        if (!connection_)
+            return std::unexpected(
+                std::error_code{ERROR_INVALID_HANDLE, std::system_category()});
+        auto request = ipc::request<ipc::WatchRequest>();
+        request.action = ipc::watch_disarm;
+        request.id = id_;
+        auto status = connection_->call(ipc::IOCTL_BLOOK_WATCH, &request,
+                                        sizeof(request), nullptr, 0);
+        if (status)
+            id_ = 0;
+        return status;
+    }
+
+    // A length-0 fetch: state and hit metadata only, no payload.
+    [[nodiscard]] result<watch_hit> poll() const noexcept {
+        if (!id_ || !connection_)
+            return std::unexpected(
+                std::error_code{ERROR_INVALID_HANDLE, std::system_category()});
+        auto request = ipc::request<ipc::DumpRequest>();
+        request.id = id_;
+        ipc::DumpResponse response{};
+        auto status = connection_->call(ipc::IOCTL_BLOOK_DUMP, &request,
+                                        sizeof(request), &response,
+                                        sizeof(response));
+        if (!status)
+            return std::unexpected(status.error());
+        return watch_hit{.rip = response.hit_rip,
+                         .cr3 = response.hit_cr3,
+                         .total = response.total,
+                         .ready = response.state == blook::watch_hit};
+    }
+
+    // Read up to `out.size()` bytes of the dump at `offset`; the returned
+    // count is what actually arrived (the range may end mid-request).
+    [[nodiscard]] result<uint32_t> read(uint64_t offset,
+                                        std::span<std::byte> out) const {
+        if (!id_ || !connection_)
+            return std::unexpected(
+                std::error_code{ERROR_INVALID_HANDLE, std::system_category()});
+        if (out.size() > ipc::dump_chunk_size)
+            return std::unexpected(std::error_code{ERROR_INVALID_PARAMETER,
+                                                   std::system_category()});
+        auto request = ipc::request<ipc::DumpRequest>();
+        request.id = id_;
+        request.offset = offset;
+        request.length = static_cast<uint32_t>(out.size());
+        ipc::DumpResponse response{};
+        auto status = connection_->call(ipc::IOCTL_BLOOK_DUMP, &request,
+                                        sizeof(request), &response,
+                                        sizeof(response));
+        if (!status)
+            return std::unexpected(status.error());
+        if (response.state != blook::watch_hit)
+            return std::unexpected(
+                std::error_code{ERROR_NOT_READY, std::system_category()});
+        if (response.copied > out.size())
+            return std::unexpected(
+                std::error_code{ERROR_INVALID_DATA, std::system_category()});
+        std::memcpy(out.data(), response.data, response.copied);
+        return response.copied;
+    }
+
+    // The whole dump, chunked. Fails with ERROR_NOT_READY while the watched
+    // address has not been executed yet.
+    [[nodiscard]] result<std::vector<std::byte>> dump() const {
+        const auto hit = poll();
+        if (!hit)
+            return std::unexpected(hit.error());
+        if (!hit->ready)
+            return std::unexpected(
+                std::error_code{ERROR_NOT_READY, std::system_category()});
+        std::vector<std::byte> out(hit->total);
+        uint64_t offset = 0;
+        while (offset < hit->total) {
+            std::array<std::byte, ipc::dump_chunk_size> chunk{};
+            const auto copied =
+                read(offset, std::span{chunk}.first(
+                                 static_cast<size_t>(
+                                     (hit->total - offset < chunk.size())
+                                         ? hit->total - offset
+                                         : chunk.size())));
+            if (!copied)
+                return std::unexpected(copied.error());
+            if (!*copied)
+                break;
+            std::memcpy(out.data() + offset, chunk.data(), *copied);
+            offset += *copied;
+        }
+        out.resize(static_cast<size_t>(offset));
+        return out;
+    }
+};
+
 // Decoded `session::query` response. Field-for-field the wire protocol, but
 // with flags as bools so call sites do not reinterpret integers.
 struct session_info {
@@ -321,6 +455,60 @@ class session final {
             return std::unexpected(std::error_code{ERROR_INVALID_PARAMETER,
                                                    std::system_category()});
         return patch(target, *bytes, owner);
+    }
+
+    // Arm an execute watch on `address` in `target` (default: this process).
+    // The first time the process executes exactly that address, the driver
+    // dumps [dump_base, dump_base + dump_size) of the same process out of
+    // physical memory and keeps it fetchable via the returned watch. This is
+    // the anti self-decrypting-shell path: the dump does not go through any
+    // user-mode API, so the sample cannot see it coming.
+    [[nodiscard]] result<watch> watch_execute(void* address, void* dump_base,
+                                              size_t dump_size,
+                                              pid target = pid::current())
+        const {
+        if (!address || !dump_base || !dump_size ||
+            dump_size > blook::max_dump)
+            return std::unexpected(std::error_code{ERROR_INVALID_PARAMETER,
+                                                   std::system_category()});
+        auto request = ipc::request<ipc::WatchRequest>();
+        request.action = ipc::watch_arm;
+        request.pid = target.value;
+        request.address = reinterpret_cast<uint64_t>(address);
+        request.dump_base = reinterpret_cast<uint64_t>(dump_base);
+        request.dump_size = dump_size;
+        ipc::WatchResponse response{};
+        auto status = call(ipc::IOCTL_BLOOK_WATCH, &request, sizeof(request),
+                           &response, sizeof(response));
+        if (!status)
+            return std::unexpected(status.error());
+        return watch{connection_, response.id};
+    }
+
+    // Module-relative form: the watched address is base + offset, the dump
+    // starts at base + dump_offset. With this the caller only has to know the
+    // module's base in the target process and the RVAs of interest.
+    [[nodiscard]] result<watch> watch_execute_at(void* base, size_t offset,
+                                                 size_t dump_offset,
+                                                 size_t dump_size,
+                                                 pid target = pid::current())
+        const {
+        if (!base || !dump_size || dump_size > blook::max_dump)
+            return std::unexpected(std::error_code{ERROR_INVALID_PARAMETER,
+                                                   std::system_category()});
+        auto request = ipc::request<ipc::WatchRequest>();
+        request.action = ipc::watch_arm;
+        request.pid = target.value;
+        request.base = reinterpret_cast<uint64_t>(base);
+        request.address = offset;
+        request.dump_base = dump_offset;
+        request.dump_size = dump_size;
+        ipc::WatchResponse response{};
+        auto status = call(ipc::IOCTL_BLOOK_WATCH, &request, sizeof(request),
+                           &response, sizeof(response));
+        if (!status)
+            return std::unexpected(status.error());
+        return watch{connection_, response.id};
     }
 
     [[nodiscard]] result<void> hide(bool enable) const noexcept {

@@ -67,6 +67,20 @@ NTSTATUS remove_owned_hook(uint64_t id, uint64_t token);
 NTSTATUS refresh_owned_hook(uint64_t id, uint64_t token);
 bool hook_present(uint64_t id);
 
+// Copy-on-write rebind. The VM hooks (NtProtectVirtualMemory,
+// NtWriteVirtualMemory) call this after a successful operation: any hook the
+// session layer placed inside [base, base + size) of `pid` may now sit on a
+// stale physical page, because changing the protection of a shared image page
+// (or writing it through another process) silently rebinds the virtual page to
+// a fresh private page. For every such hook the current backing page is
+// resolved again; when its PFN changed the hook moves to the new page -
+// without this the EPT entry traps a page nobody executes any more and the
+// patched copy runs unhooked.
+// PASSIVE_LEVEL only (page probing + per-processor re-install).
+NTSTATUS rebind_hooks_if_copied(uint32_t pid, const void* base, size_t size);
+uint64_t rebind_count();
+uint64_t rebind_failure_count();
+
 // Call-original window. Only valid on the logical processor that is currently
 // executing the hook handler, which is exactly how the guest side handlers use
 // it: begin, call the real function, end.

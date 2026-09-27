@@ -18,6 +18,10 @@ enum class operation : uint8_t {
     // is exactly the one executing the hook handler.
     window_begin,
     window_end,
+    // Execute watches (dump-on-execute). `install` carries a watch_spec* in
+    // rcx and the shared watch_record* in rdx.
+    watch_install,
+    watch_remove,
 };
 
 inline constexpr uint64_t call_tag = 0x424c4f4f4b;

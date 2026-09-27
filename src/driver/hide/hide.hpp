@@ -14,6 +14,12 @@ namespace blook::hide {
 NTSTATUS activate();
 void deactivate();
 
+// Core VM maintenance hooks (copy-on-write rebind), independent of the
+// profile: activate right after the hypervisor starts, deactivate before it
+// stops. Deactivating the profile does not touch these.
+NTSTATUS activate_maintenance();
+void deactivate_maintenance();
+
 // Window hides patch win32k and are therefore a separate opt-in.
 NTSTATUS enable_windows(bool enable);
 [[nodiscard]] bool windows_active();

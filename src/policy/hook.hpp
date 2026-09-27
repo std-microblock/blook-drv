@@ -5,7 +5,12 @@
 
 namespace blook {
 inline constexpr size_t max_hooks = 64;
+inline constexpr size_t max_watches = 16;
 inline constexpr size_t max_patch = 64;
+// One dump record carries at most this many bytes of guest memory. 16 MiB is
+// enough for a full unpacked image of any realistic shell while staying a
+// single non-paged allocation.
+inline constexpr size_t max_dump = 16ull * 1024 * 1024;
 inline constexpr uint64_t page_mask = 0x000ffffffffff000ull;
 
 // kernel: the hook fires for every address space that maps the page. The
@@ -116,6 +121,40 @@ inline constexpr size_t jump_patch_length = 6;
         return true;
     return !patch_ranges_overlap(existing, incoming);
 }
+
+// Execute watch: no patch, no shadow page. The physical page of the watched
+// address is armed not-executable; an execute violation whose RIP is exactly
+// `target` while the owning address space is active triggers a dump into the
+// shared record. Same process scoping as user hooks: the identity page is the
+// owner PEB.
+struct watch_spec {
+    uint64_t id{};
+    uint64_t pfn{};               // physical page of the watched address
+    uint64_t target{};            // linear address whose execution fires
+    uint64_t address_space{};     // PEB PFN of the owner process
+    uint64_t identity_address{};  // linear address of the PEB
+    uint32_t owner_pid{};
+    uint8_t domain_{};            // reserved, always 0 (user scope)
+};
+
+// Dump states of a watch record.
+inline constexpr uint32_t watch_pending = 0;
+inline constexpr uint32_t watch_hit = 1;
+
+// Shared between the hypervisor (root mode writes it on a hit) and the driver
+// (PASSIVE_LEVEL reads it for the fetch IOCTL). Non-paged, stable address.
+// Root mode only ever touches `state` last: a reader that sees watch_hit can
+// rely on every other field being final.
+struct watch_record {
+    volatile uint32_t state{watch_pending};
+    uint32_t reserved{};
+    uint64_t hit_rip{};
+    uint64_t hit_cr3{};
+    uint64_t dump_base{};   // guest linear address the dump starts at
+    uint64_t dump_size{};   // requested bytes
+    uint8_t* buffer{};      // non-paged, max_dump capacity
+    // Everything after the pointer is internal to the root-mode writer.
+};
 
 // Pure state transition policy, also exercised by the host tests.
 enum class ept_view {

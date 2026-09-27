@@ -31,8 +31,14 @@ inline constexpr auto IOCTL_BLOOK_STATS = ioctl(9);
 // a different physical page than the one the process is executing. Only a real
 // translation can tell those apart.
 inline constexpr auto IOCTL_BLOOK_PROBE = ioctl(10);
+// Execute watches (dump-on-execute, anti self-decrypting shell): WATCH arms
+// or disarms a one-shot execute trap on an address in a target process; when
+// the process executes it, the hypervisor dumps a configured VM range into a
+// non-paged record. DUMP polls the state and fetches the dump in chunks.
+inline constexpr auto IOCTL_BLOOK_WATCH = ioctl(11);
+inline constexpr auto IOCTL_BLOOK_DUMP = ioctl(12);
 
-inline constexpr uint32_t abi_version = 4;
+inline constexpr uint32_t abi_version = 5;
 
 struct Header {
     uint32_t version{abi_version};
@@ -174,6 +180,46 @@ struct ScrubRequest {
     uint32_t pid{};
     uint32_t flags{};
 };
+
+// `address`, `dump_base` and `dump_size` describe the watched address and the
+// range copied out on a hit. `base` is added to the first two, so a caller
+// can think in (module base, RVA) instead of absolute addresses. Watches are
+// one-shot; a hit leaves the dump fetchable until the watch is disarmed (or
+// the session dies).
+inline constexpr uint32_t watch_arm = 1;
+inline constexpr uint32_t watch_disarm = 2;
+struct WatchRequest {
+    Header header{};
+    uint64_t address{};
+    uint64_t base{};
+    uint64_t dump_base{};
+    uint64_t dump_size{};  // capped by blook::max_dump (16 MiB)
+    uint64_t id{};         // disarm input
+    uint32_t pid{};        // 0 = the calling process
+    uint32_t action{};     // watch_arm / watch_disarm
+};
+struct WatchResponse {
+    uint64_t id{};
+};
+// Chunks per fetch: the same request is repeated with a growing `offset`
+// until `total` bytes have been read.
+inline constexpr uint32_t dump_chunk_size = 40960;
+struct DumpRequest {
+    Header header{};
+    uint64_t id{};
+    uint64_t offset{};
+    uint32_t length{};  // <= dump_chunk_size
+    uint32_t reserved{};
+};
+struct DumpResponse {
+    Header header{};
+    uint32_t state{};  // blook::watch_pending / blook::watch_hit
+    uint32_t copied{};
+    uint64_t total{};
+    uint64_t hit_rip{};
+    uint64_t hit_cr3{};
+    uint8_t data[dump_chunk_size]{};
+};
 struct QueryResponse {
     uint32_t version{}, running{}, enabled{}, hooks{};
     uint32_t hidden{};
@@ -185,7 +231,37 @@ struct QueryResponse {
     uint32_t window_hooks{};
 };
 
-// ABI v4 layout: fail compilation rather than silently changing the wire
+static_assert(sizeof(WatchRequest) == 56 && alignof(WatchRequest) == 8);
+static_assert(offsetof(WatchRequest, header) == 0);
+static_assert(offsetof(WatchRequest, address) == 8);
+static_assert(offsetof(WatchRequest, base) == 16);
+static_assert(offsetof(WatchRequest, dump_base) == 24);
+static_assert(offsetof(WatchRequest, dump_size) == 32);
+static_assert(offsetof(WatchRequest, id) == 40);
+static_assert(offsetof(WatchRequest, pid) == 48);
+static_assert(offsetof(WatchRequest, action) == 52);
+
+static_assert(sizeof(WatchResponse) == 8 && alignof(WatchResponse) == 8);
+static_assert(offsetof(WatchResponse, id) == 0);
+
+static_assert(sizeof(DumpRequest) == 32 && alignof(DumpRequest) == 8);
+static_assert(offsetof(DumpRequest, header) == 0);
+static_assert(offsetof(DumpRequest, id) == 8);
+static_assert(offsetof(DumpRequest, offset) == 16);
+static_assert(offsetof(DumpRequest, length) == 24);
+static_assert(offsetof(DumpRequest, reserved) == 28);
+
+static_assert(sizeof(DumpResponse) == 8 + 4 + 4 + 8 + 8 + 8 + dump_chunk_size &&
+              alignof(DumpResponse) == 8);
+static_assert(offsetof(DumpResponse, header) == 0);
+static_assert(offsetof(DumpResponse, state) == 8);
+static_assert(offsetof(DumpResponse, copied) == 12);
+static_assert(offsetof(DumpResponse, total) == 16);
+static_assert(offsetof(DumpResponse, hit_rip) == 24);
+static_assert(offsetof(DumpResponse, hit_cr3) == 32);
+static_assert(offsetof(DumpResponse, data) == 40);
+
+// ABI v5 layout: fail compilation rather than silently changing the wire
 // format.
 static_assert(sizeof(Header) == 8 && alignof(Header) == 4);
 static_assert(offsetof(Header, version) == 0);
@@ -259,7 +335,8 @@ template <class T>
 concept WireRequest =
     detail::same_type<T, PingRequest> || detail::same_type<T, EnableRequest> ||
     detail::same_type<T, InstallRequest> || detail::same_type<T, HookRequest> ||
-    detail::same_type<T, HideRequest> || detail::same_type<T, ScrubRequest>;
+    detail::same_type<T, HideRequest> || detail::same_type<T, ScrubRequest> ||
+    detail::same_type<T, WatchRequest> || detail::same_type<T, DumpRequest>;
 
 template <WireRequest T>
 [[nodiscard]] constexpr T request() noexcept {
