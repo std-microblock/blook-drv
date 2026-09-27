@@ -1,4 +1,5 @@
-// Adapted from jonomango/hv (MIT). See LICENSES/jonomango-hv.txt and docs/REFERENCES.md.
+// Adapted from jonomango/hv (MIT). See LICENSES/jonomango-hv.txt and
+// docs/REFERENCES.md.
 #pragma once
 
 namespace hv {
@@ -25,5 +26,4 @@ void interrupt_handler_19();
 void interrupt_handler_20();
 void interrupt_handler_30();
 
-} // namespace hv
-
+}  // namespace hv

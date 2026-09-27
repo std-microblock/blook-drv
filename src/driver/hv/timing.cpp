@@ -47,8 +47,9 @@ void initialize_timing_switch() {
     timing_hidden_cached = blook::service_mask_allows(L"HideTiming", 0);
 }
 
-bool timing_hidden() { return timing_hidden_cached; }
-
+bool timing_hidden() {
+    return timing_hidden_cached;
+}
 
 void hide_vm_exit_overhead(vcpu* const cpu) {
     if (!timing_hidden()) {

@@ -707,8 +707,12 @@ volatile uint64_t rebinds{};
 volatile uint64_t rebind_failures{};
 }  // namespace
 
-uint64_t rebind_count() { return rebinds; }
-uint64_t rebind_failure_count() { return rebind_failures; }
+uint64_t rebind_count() {
+    return rebinds;
+}
+uint64_t rebind_failure_count() {
+    return rebind_failures;
+}
 
 NTSTATUS rebind_hooks_if_copied(uint32_t pid, const void* base, size_t size) {
     if (!store || KeGetCurrentIrql() != PASSIVE_LEVEL || !pid || !base || !size)

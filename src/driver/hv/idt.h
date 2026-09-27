@@ -1,4 +1,5 @@
-// Adapted from jonomango/hv (MIT). See LICENSES/jonomango-hv.txt and docs/REFERENCES.md.
+// Adapted from jonomango/hv (MIT). See LICENSES/jonomango-hv.txt and
+// docs/REFERENCES.md.
 #pragma once
 
 #include <ia32.hpp>
@@ -11,5 +12,4 @@ inline constexpr size_t host_idt_descriptor_count = 256;
 // initialize the host IDT and populate every descriptor
 void prepare_host_idt(segment_descriptor_interrupt_gate_64* idt);
 
-} // namespace hv
-
+}  // namespace hv

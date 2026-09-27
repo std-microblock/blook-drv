@@ -134,7 +134,7 @@ struct watch_spec {
     uint64_t address_space{};     // PEB PFN of the owner process
     uint64_t identity_address{};  // linear address of the PEB
     uint32_t owner_pid{};
-    uint8_t domain_{};            // reserved, always 0 (user scope)
+    uint8_t domain_{};  // reserved, always 0 (user scope)
 };
 
 // Dump states of a watch record.
@@ -150,9 +150,9 @@ struct watch_record {
     uint32_t reserved{};
     uint64_t hit_rip{};
     uint64_t hit_cr3{};
-    uint64_t dump_base{};   // guest linear address the dump starts at
-    uint64_t dump_size{};   // requested bytes
-    uint8_t* buffer{};      // non-paged, max_dump capacity
+    uint64_t dump_base{};  // guest linear address the dump starts at
+    uint64_t dump_size{};  // requested bytes
+    uint8_t* buffer{};     // non-paged, max_dump capacity
     // Everything after the pointer is internal to the root-mode writer.
 };
 

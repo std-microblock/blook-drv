@@ -26,10 +26,10 @@ using open_process_t = NTSTATUS (*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES,
 using open_thread_t = NTSTATUS (*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES,
                                    PCLIENT_ID);
 using debug_active_process_t = NTSTATUS (*)(HANDLE, HANDLE);
-using write_virtual_memory_t = NTSTATUS (*)(HANDLE, PVOID, PVOID, SIZE_T, PSIZE_T);
+using write_virtual_memory_t = NTSTATUS (*)(HANDLE, PVOID, PVOID, SIZE_T,
+                                            PSIZE_T);
 using protect_virtual_memory_t = NTSTATUS (*)(HANDLE, PVOID*, PSIZE_T, ULONG,
                                               PULONG);
-
 
 // A hooked service: the id is what the handler hands to the call-original
 // window, `original` is the untouched entry point of the real service.
@@ -118,17 +118,20 @@ uint32_t scrubbed[16]{};
 bool first_contact(uint32_t pid) {
     exclusive_lock lock{scrub_lock};
     const auto slot = pid % (sizeof(scrubbed) / sizeof(scrubbed[0]));
-    if (scrubbed[slot] == pid) return false;
+    if (scrubbed[slot] == pid)
+        return false;
     scrubbed[slot] = pid;
     return true;
 }
 
 void scrub_on_first_contact() {
-    if (!roles::is_target()) return;
+    if (!roles::is_target())
+        return;
     auto* process = PsGetCurrentProcess();
     const auto pid = static_cast<uint32_t>(
         reinterpret_cast<uintptr_t>(PsGetProcessId(process)));
-    if (pid && first_contact(pid)) peb::process(process, peb::scrub_flags);
+    if (pid && first_contact(pid))
+        peb::process(process, peb::scrub_flags);
 }
 
 // NtWriteVirtualMemory
@@ -142,12 +145,15 @@ struct flag_patch {
     uint8_t saved{};
 };
 
-flag_patch neutralise_flag_byte(HANDLE process_handle, PVOID base, PVOID buffer, SIZE_T size) {
+flag_patch neutralise_flag_byte(HANDLE process_handle, PVOID base, PVOID buffer,
+                                SIZE_T size) {
     flag_patch result;
-    if (!base || !buffer || !size) return result;
+    if (!base || !buffer || !size)
+        return result;
     PEPROCESS process{};
-    if (!NT_SUCCESS(ObReferenceObjectByHandle(process_handle, 0, *PsProcessType,
-            ExGetPreviousMode(), reinterpret_cast<PVOID*>(&process), nullptr)))
+    if (!NT_SUCCESS(ObReferenceObjectByHandle(
+            process_handle, 0, *PsProcessType, ExGetPreviousMode(),
+            reinterpret_cast<PVOID*>(&process), nullptr)))
         return result;
     // Tools may write to themselves; only the sample is protected.
     if (roles::of_process(process) == role::tool) {
@@ -193,16 +199,17 @@ uint32_t pid_of(PEPROCESS process) {
         reinterpret_cast<uintptr_t>(PsGetProcessId(process)));
 }
 
-NTSTATUS hook_write_virtual_memory(HANDLE process_handle, PVOID base, PVOID buffer,
-                                   SIZE_T size, PSIZE_T written) {
+NTSTATUS hook_write_virtual_memory(HANDLE process_handle, PVOID base,
+                                   PVOID buffer, SIZE_T size, PSIZE_T written) {
     flag_patch patch;
     if (roles::is_tool() && ExGetPreviousMode() == UserMode)
         patch = neutralise_flag_byte(process_handle, base, buffer, size);
     const auto status = call_original(write_virtual_memory, process_handle,
                                       base, buffer, size, written);
     if (patch.byte) {
-        __try { *patch.byte = patch.saved; }
-        __except (EXCEPTION_EXECUTE_HANDLER) {
+        __try {
+            *patch.byte = patch.saved;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
     }
     // A cross-process write to shared image pages copy-on-writes them in the
@@ -292,44 +299,43 @@ void strip_processes(PVOID buffer, PULONG return_length) {
     ULONG previous = 0;
     bool have_previous = false;
     __try {
-    while (read + sizeof(system_process_entry) <= used) {
-        auto* node = reinterpret_cast<system_process_entry*>(base + read);
-        const ULONG offset = node->next_entry_offset;
-        const ULONG size = offset ? offset : (used - read);
-        if (size < sizeof(system_process_entry) || read + size > used)
-            break;
-        if (offset && (offset & 3))
-            break;
+        while (read + sizeof(system_process_entry) <= used) {
+            auto* node = reinterpret_cast<system_process_entry*>(base + read);
+            const ULONG offset = node->next_entry_offset;
+            const ULONG size = offset ? offset : (used - read);
+            if (size < sizeof(system_process_entry) || read + size > used)
+                break;
+            if (offset && (offset & 3))
+                break;
 
-        bool hidden = false;
-        if (node->image_name.Buffer && node->image_name.Length) {
-            const auto length = node->image_name.Length / sizeof(wchar_t);
-            // The name pointer inside the entry is a user-mode pointer that the
-            // service already validated; the length is not trusted further than
-            // this bound before it is walked.
-            if (length < 32768)
-                hidden =
-                    blook::classify(node->image_name.Buffer, length) == role::tool;
-        }
-        hidden = hidden ||
-                 roles::pinned_role(static_cast<uint32_t>(
-                     reinterpret_cast<uintptr_t>(node->unique_process_id))) ==
-                     role::tool;
+            bool hidden = false;
+            if (node->image_name.Buffer && node->image_name.Length) {
+                const auto length = node->image_name.Length / sizeof(wchar_t);
+                // The name pointer inside the entry is a user-mode pointer that
+                // the service already validated; the length is not trusted
+                // further than this bound before it is walked.
+                if (length < 32768)
+                    hidden = blook::classify(node->image_name.Buffer, length) ==
+                             role::tool;
+            }
+            hidden = hidden || roles::pinned_role(static_cast<uint32_t>(
+                                   reinterpret_cast<uintptr_t>(
+                                       node->unique_process_id))) == role::tool;
 
-        if (!hidden) {
-            if (write != read)
-                memmove(base + write, node, size);
-            if (have_previous)
-                reinterpret_cast<system_process_entry*>(base + previous)
-                    ->next_entry_offset = write - previous;
-            previous = write;
-            have_previous = true;
-            write += size;
+            if (!hidden) {
+                if (write != read)
+                    memmove(base + write, node, size);
+                if (have_previous)
+                    reinterpret_cast<system_process_entry*>(base + previous)
+                        ->next_entry_offset = write - previous;
+                previous = write;
+                have_previous = true;
+                write += size;
+            }
+            if (!offset)
+                break;
+            read += size;
         }
-        if (!offset)
-            break;
-        read += size;
-    }
 
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         // Best effort: leave the list as the service produced it.
@@ -347,7 +353,8 @@ void strip_processes(PVOID buffer, PULONG return_length) {
         return;
     }
 
-    reinterpret_cast<system_process_entry*>(base + previous)->next_entry_offset = 0;
+    reinterpret_cast<system_process_entry*>(base + previous)
+        ->next_entry_offset = 0;
     *return_length = write;
 }
 
@@ -355,9 +362,9 @@ void strip_modules(PVOID buffer, ULONG length) {
     if (!buffer || length < sizeof(rtl_process_modules))
         return;
     auto* modules = static_cast<rtl_process_modules*>(buffer);
-    const auto capacity = static_cast<ULONG>(
-        (length - offsetof(rtl_process_modules, modules)) /
-        sizeof(rtl_process_module_information));
+    const auto capacity =
+        static_cast<ULONG>((length - offsetof(rtl_process_modules, modules)) /
+                           sizeof(rtl_process_module_information));
     __try {
         ULONG index = 0;
         while (index < modules->number_of_modules && index < capacity) {
@@ -444,7 +451,8 @@ handler_probe_record handler_probes[32]{};
 volatile uint64_t handler_probe_total{};
 
 NTSTATUS hook_query_system_information_impl(ULONG info_class, PVOID buffer,
-                                       ULONG length, PULONG return_length) {
+                                            ULONG length,
+                                            PULONG return_length) {
     {
         auto const total = ++handler_probe_total;
         if (total <= 32) {
@@ -515,16 +523,16 @@ NTSTATUS hook_query_system_information(ULONG info_class, PVOID buffer,
     auto const before_0 = return_slot ? return_slot[0] : 0;
     auto const before_1 = return_slot ? return_slot[1] : 0;
     auto const before_2 = return_slot ? return_slot[2] : 0;
-    auto const status =
-        hook_query_system_information_impl(info_class, buffer, length, return_length);
+    auto const status = hook_query_system_information_impl(
+        info_class, buffer, length, return_length);
     auto const after_0 = return_slot ? return_slot[0] : 0;
     auto const after_1 = return_slot ? return_slot[1] : 0;
     auto const after_2 = return_slot ? return_slot[2] : 0;
     for (uint64_t i = 0; i < 32; ++i) {
         auto& probe = handler_probes[i];
         if (probe.sequence != 0 && probe.return_slot == before_0 &&
-            probe.arg0 == info_class &&
-            probe.arg2 == length && probe.return_slot_after == 0) {
+            probe.arg0 == info_class && probe.arg2 == length &&
+            probe.return_slot_after == 0) {
             probe.return_slot_after = after_0;
             probe.slot1_after = after_1;
             probe.slot2_after = after_2;
@@ -540,9 +548,8 @@ NTSTATUS hook_query_information_process(HANDLE process_handle,
                                         ULONG length, PULONG return_length) {
     const bool spoof = roles::is_target() && ExGetPreviousMode() == UserMode;
     scrub_on_first_contact();
-    const auto status = call_original(query_information_process,
-                                      process_handle, info_class, info, length,
-                                      return_length);
+    const auto status = call_original(query_information_process, process_handle,
+                                      info_class, info, length, return_length);
     if (!spoof || !NT_SUCCESS(status))
         return status;
 
@@ -706,15 +713,18 @@ install_entry core_entries[] = {
      reinterpret_cast<void*>(&hook_protect_virtual_memory)},
     {&write_virtual_memory.id,
      reinterpret_cast<void**>(&write_virtual_memory.original),
-     L"NtWriteVirtualMemory", reinterpret_cast<void*>(&hook_write_virtual_memory)},
+     L"NtWriteVirtualMemory",
+     reinterpret_cast<void*>(&hook_write_virtual_memory)},
 };
 }  // namespace
 
 void forget_process(ULONG pid) {
-    if (!pid) return;
+    if (!pid)
+        return;
     exclusive_lock lock{scrub_lock};
     for (auto& value : scrubbed)
-        if (value == pid) value = 0;
+        if (value == pid)
+            value = 0;
 }
 
 bool installed() {
@@ -752,7 +762,8 @@ NTSTATUS install_table(install_entry* table, uint32_t entry_count,
         // A service that is not exported on this build is skipped rather than
         // guessed at.
         if (!address) {
-            blook::bringup_write("install: name unresolved, index", index, true);
+            blook::bringup_write("install: name unresolved, index", index,
+                                 true);
             continue;
         }
         // prepare_hook builds the patch: only it knows the literal slot.
@@ -762,10 +773,11 @@ NTSTATUS install_table(install_entry* table, uint32_t entry_count,
         // be reached from another processor as soon as its own processor is
         // armed.
         prepared_hook prepared{};
-        const auto prepared_status = prepare_hook(0, system_token, address, patch,
-                                                  jump_patch_length, prepared,
-                                                  entry.handler);
-        blook::bringup_write("install: prepare status", static_cast<uint32_t>(prepared_status), true);
+        const auto prepared_status =
+            prepare_hook(0, system_token, address, patch, jump_patch_length,
+                         prepared, entry.handler);
+        blook::bringup_write("install: prepare status",
+                             static_cast<uint32_t>(prepared_status), true);
         if (!NT_SUCCESS(prepared_status))
             continue;
 

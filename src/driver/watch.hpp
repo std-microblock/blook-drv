@@ -29,8 +29,8 @@ void shutdown();
 
 // Arm a watch on `address` (a user-mode VA in `pid`), dumping
 // [dump_base, dump_base + dump_size) of the same process on the first hit.
-NTSTATUS arm(uint32_t pid, uint64_t token, uint64_t address,
-             uint64_t dump_base, uint64_t dump_size, uint64_t& id);
+NTSTATUS arm(uint32_t pid, uint64_t token, uint64_t address, uint64_t dump_base,
+             uint64_t dump_size, uint64_t& id);
 NTSTATUS disarm(uint64_t id, uint64_t token);
 
 // Copy state and up to `length` bytes of the dump buffer at `offset` into the

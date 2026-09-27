@@ -32,11 +32,14 @@ struct point {
     LONG y;
 };
 
-using zw_query_system_information_t = NTSTATUS(*)(ULONG, PVOID, ULONG, PULONG);
-using query_window_t = ULONG_PTR(*)(void* window, ULONG index);
-using find_window_ex_t = void* (*)(void* parent, void* after, void* class_name, void* window_name, ULONG type);
-using build_hwnd_list_t = NTSTATUS(*)(void* desktop, void* next, BOOLEAN children, BOOLEAN immersive,
-                                      ULONG thread_id, ULONG count, void** list, PULONG returned);
+using zw_query_system_information_t = NTSTATUS (*)(ULONG, PVOID, ULONG, PULONG);
+using query_window_t = ULONG_PTR (*)(void* window, ULONG index);
+using find_window_ex_t = void* (*)(void* parent, void* after, void* class_name,
+                                   void* window_name, ULONG type);
+using build_hwnd_list_t = NTSTATUS (*)(void* desktop, void* next,
+                                       BOOLEAN children, BOOLEAN immersive,
+                                       ULONG thread_id, ULONG count,
+                                       void** list, PULONG returned);
 using get_foreground_window_t = void* (*)();
 using window_from_point_t = void* (*)(point value);
 
@@ -65,12 +68,18 @@ void* last_foreground{};
 class window final {
     uint64_t id_;
 
-public:
-    explicit window(uint64_t id) : id_(id) { if (id_ && !begin_hook_window(id_)) id_ = 0; }
+   public:
+    explicit window(uint64_t id) : id_(id) {
+        if (id_ && !begin_hook_window(id_))
+            id_ = 0;
+    }
     // Only an open window makes the hooked page run the untouched bytes; the
     // callers below check this before invoking the original.
     explicit operator bool() const { return id_ != 0; }
-    ~window() { if (id_) end_hook_window(id_); }
+    ~window() {
+        if (id_)
+            end_hook_window(id_);
+    }
     window(const window&) = delete;
     window& operator=(const window&) = delete;
 };
@@ -78,7 +87,8 @@ public:
 zw_query_system_information_t zw_query_system_information() {
     UNICODE_STRING name;
     RtlInitUnicodeString(&name, L"ZwQuerySystemInformation");
-    return reinterpret_cast<zw_query_system_information_t>(MmGetSystemRoutineAddress(&name));
+    return reinterpret_cast<zw_query_system_information_t>(
+        MmGetSystemRoutineAddress(&name));
 }
 
 // Locate a loaded module through the system module list. Uses the ntoskrnl
@@ -91,20 +101,27 @@ struct module_range {
 module_range find_module(const char* wanted) {
     module_range result;
     auto query = zw_query_system_information();
-    if (!query) return result;
+    if (!query)
+        return result;
     ULONG needed{};
     query(module_information_class, nullptr, 0, &needed);
-    if (!needed || needed > (16u << 20)) return result;
-    auto* buffer = static_cast<uint8_t*>(ExAllocatePool2(POOL_FLAG_NON_PAGED, needed, 'kwbl'));
-    if (!buffer) return result;
+    if (!needed || needed > (16u << 20))
+        return result;
+    auto* buffer = static_cast<uint8_t*>(
+        ExAllocatePool2(POOL_FLAG_NON_PAGED, needed, 'kwbl'));
+    if (!buffer)
+        return result;
     if (NT_SUCCESS(query(module_information_class, buffer, needed, &needed))) {
         auto* modules = reinterpret_cast<rtl_process_modules*>(buffer);
         for (ULONG i = 0; i < modules->number_of_modules; ++i) {
             const auto& entry = modules->modules[i];
-            const auto* path = reinterpret_cast<const char*>(entry.full_path_name);
+            const auto* path =
+                reinterpret_cast<const char*>(entry.full_path_name);
             size_t length = 0;
-            while (length < 256 && path[length]) ++length;
-            if (!contains(path, length, wanted)) continue;
+            while (length < 256 && path[length])
+                ++length;
+            if (!contains(path, length, wanted))
+                continue;
             result.base = entry.image_base;
             result.size = entry.image_size;
             break;
@@ -117,26 +134,41 @@ module_range find_module(const char* wanted) {
 // Minimal PE export lookup. Every read is guarded: a module whose headers are
 // not resident must never turn into a fault in root context.
 void* find_export(void* base, const char* wanted, uint64_t image_size) {
-    if (!base || !image_size) return nullptr;
+    if (!base || !image_size)
+        return nullptr;
     auto* bytes = static_cast<uint8_t*>(base);
     __try {
         const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(bytes);
-        if (dos->e_magic != IMAGE_DOS_SIGNATURE) return nullptr;
-        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(bytes + dos->e_lfanew);
-        if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) return nullptr;
-        const auto& directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
-        if (!directory.VirtualAddress || directory.Size > image_size) return nullptr;
-        const auto* exports = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(bytes + directory.VirtualAddress);
-        const auto* names = reinterpret_cast<const ULONG*>(bytes + exports->AddressOfNames);
-        const auto* ordinals = reinterpret_cast<const USHORT*>(bytes + exports->AddressOfNameOrdinals);
-        const auto* functions = reinterpret_cast<const ULONG*>(bytes + exports->AddressOfFunctions);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE)
+            return nullptr;
+        const auto* nt =
+            reinterpret_cast<const IMAGE_NT_HEADERS64*>(bytes + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE ||
+            nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+            return nullptr;
+        const auto& directory =
+            nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+        if (!directory.VirtualAddress || directory.Size > image_size)
+            return nullptr;
+        const auto* exports = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(
+            bytes + directory.VirtualAddress);
+        const auto* names =
+            reinterpret_cast<const ULONG*>(bytes + exports->AddressOfNames);
+        const auto* ordinals = reinterpret_cast<const USHORT*>(
+            bytes + exports->AddressOfNameOrdinals);
+        const auto* functions =
+            reinterpret_cast<const ULONG*>(bytes + exports->AddressOfFunctions);
         for (ULONG i = 0; i < exports->NumberOfNames; ++i) {
-            const auto* candidate = reinterpret_cast<const char*>(bytes + names[i]);
+            const auto* candidate =
+                reinterpret_cast<const char*>(bytes + names[i]);
             size_t length = 0;
-            while (length < 128 && candidate[length]) ++length;
-            if (!contains(candidate, length, wanted)) continue;
+            while (length < 128 && candidate[length])
+                ++length;
+            if (!contains(candidate, length, wanted))
+                continue;
             const auto rva = functions[ordinals[i]];
-            if (!rva || rva >= image_size) return nullptr;
+            if (!rva || rva >= image_size)
+                return nullptr;
             return bytes + rva;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -146,7 +178,8 @@ void* find_export(void* base, const char* wanted, uint64_t image_size) {
 }
 
 bool in_module(const void* address) {
-    if (!win32kfull_base || !address) return false;
+    if (!win32kfull_base || !address)
+        return false;
     const auto value = reinterpret_cast<uint64_t>(address);
     const auto start = reinterpret_cast<uint64_t>(win32kfull_base);
     return value >= start && value < start + win32kfull_size;
@@ -155,14 +188,18 @@ bool in_module(const void* address) {
 // The window's owning process, asked through the service itself. The window
 // hook is bypassed on purpose: this must see the real PID.
 uint32_t window_pid(void* hwnd) {
-    if (!hwnd || !query_window.id || !*query_window.original) return 0;
+    if (!hwnd || !query_window.id || !*query_window.original)
+        return 0;
     window guard{query_window.id};
-    if (!guard) return 0;
+    if (!guard)
+        return 0;
     // Without an open window the call would execute the patch and re-enter
     // this handler; report "nothing" instead of recursing.
-    if (!guard) return 0;
+    if (!guard)
+        return 0;
     auto* original = *query_window.original;
-    return static_cast<uint32_t>(reinterpret_cast<query_window_t>(original)(hwnd, window_process_index));
+    return static_cast<uint32_t>(
+        reinterpret_cast<query_window_t>(original)(hwnd, window_process_index));
 }
 
 bool tool_window(void* hwnd) {
@@ -173,9 +210,11 @@ bool tool_window(void* hwnd) {
 
 namespace {
 ULONG_PTR handler_query_window(void* wnd, ULONG index) {
-    if (!query_window.id || !*query_window.original) return 0;
+    if (!query_window.id || !*query_window.original)
+        return 0;
     window guard{query_window.id};
-    const auto original = reinterpret_cast<query_window_t>(*query_window.original);
+    const auto original =
+        reinterpret_cast<query_window_t>(*query_window.original);
     const auto result = original(wnd, index);
     // WindowProcess is the only index that exposes a PID; the sample sees the
     // tool as process 0, which is what "no such window owner" looks like.
@@ -185,38 +224,52 @@ ULONG_PTR handler_query_window(void* wnd, ULONG index) {
     return result;
 }
 
-void* handler_find_window_ex(void* parent, void* after, void* class_name, void* window_name, ULONG type) {
-    if (!find_window_ex.id || !*find_window_ex.original) return nullptr;
+void* handler_find_window_ex(void* parent, void* after, void* class_name,
+                             void* window_name, ULONG type) {
+    if (!find_window_ex.id || !*find_window_ex.original)
+        return nullptr;
     window guard{find_window_ex.id};
     // Without an open window the call would execute the patch and re-enter
     // this handler; report "nothing" instead of recursing.
-    if (!guard) return 0;
-    const auto original = reinterpret_cast<find_window_ex_t>(*find_window_ex.original);
+    if (!guard)
+        return 0;
+    const auto original =
+        reinterpret_cast<find_window_ex_t>(*find_window_ex.original);
     const auto result = original(parent, after, class_name, window_name, type);
-    if (result && roles::is_target() && tool_window(result)) return nullptr;
+    if (result && roles::is_target() && tool_window(result))
+        return nullptr;
     return result;
 }
 
-NTSTATUS handler_build_hwnd_list(void* desktop, void* next, BOOLEAN children, BOOLEAN immersive,
-                                 ULONG thread_id, ULONG count, void** list, PULONG returned) {
+NTSTATUS handler_build_hwnd_list(void* desktop, void* next, BOOLEAN children,
+                                 BOOLEAN immersive, ULONG thread_id,
+                                 ULONG count, void** list, PULONG returned) {
     if (!build_hwnd_list.id || !*build_hwnd_list.original)
         return STATUS_DEVICE_NOT_READY;
     NTSTATUS status;
     {
         window guard{build_hwnd_list.id};
-    // Without an open window the call would execute the patch and re-enter
-    // this handler; report "nothing" instead of recursing.
-    if (!guard) return STATUS_DEVICE_NOT_READY;
-        const auto original = reinterpret_cast<build_hwnd_list_t>(*build_hwnd_list.original);
-        status = original(desktop, next, children, immersive, thread_id, count, list, returned);
+        // Without an open window the call would execute the patch and re-enter
+        // this handler; report "nothing" instead of recursing.
+        if (!guard)
+            return STATUS_DEVICE_NOT_READY;
+        const auto original =
+            reinterpret_cast<build_hwnd_list_t>(*build_hwnd_list.original);
+        status = original(desktop, next, children, immersive, thread_id, count,
+                          list, returned);
     }
-    if (!NT_SUCCESS(status) || !list || !returned || !roles::is_target()) return status;
+    if (!NT_SUCCESS(status) || !list || !returned || !roles::is_target())
+        return status;
     auto* windows = reinterpret_cast<void**>(list);
     __try {
         ULONG index = 0;
         while (index < *returned) {
-            if (!windows[index] || !tool_window(windows[index])) { ++index; continue; }
-            for (ULONG i = index; i + 1 < *returned; ++i) windows[i] = windows[i + 1];
+            if (!windows[index] || !tool_window(windows[index])) {
+                ++index;
+                continue;
+            }
+            for (ULONG i = index; i + 1 < *returned; ++i)
+                windows[i] = windows[i + 1];
             windows[*returned - 1] = nullptr;
             --*returned;
         }
@@ -226,14 +279,18 @@ NTSTATUS handler_build_hwnd_list(void* desktop, void* next, BOOLEAN children, BO
 }
 
 void* handler_get_foreground_window() {
-    if (!get_foreground_window.id || !*get_foreground_window.original) return nullptr;
+    if (!get_foreground_window.id || !*get_foreground_window.original)
+        return nullptr;
     window guard{get_foreground_window.id};
     // Without an open window the call would execute the patch and re-enter
     // this handler; report "nothing" instead of recursing.
-    if (!guard) return 0;
-    const auto original = reinterpret_cast<get_foreground_window_t>(*get_foreground_window.original);
+    if (!guard)
+        return 0;
+    const auto original = reinterpret_cast<get_foreground_window_t>(
+        *get_foreground_window.original);
     const auto result = original();
-    if (!result || !roles::is_target()) return result;
+    if (!result || !roles::is_target())
+        return result;
     if (!tool_window(result)) {
         last_foreground = result;
         return result;
@@ -244,14 +301,18 @@ void* handler_get_foreground_window() {
 }
 
 void* handler_window_from_point(point value) {
-    if (!window_from_point.id || !*window_from_point.original) return nullptr;
+    if (!window_from_point.id || !*window_from_point.original)
+        return nullptr;
     window guard{window_from_point.id};
     // Without an open window the call would execute the patch and re-enter
     // this handler; report "nothing" instead of recursing.
-    if (!guard) return 0;
-    const auto original = reinterpret_cast<window_from_point_t>(*window_from_point.original);
+    if (!guard)
+        return 0;
+    const auto original =
+        reinterpret_cast<window_from_point_t>(*window_from_point.original);
     const auto result = original(value);
-    if (result && roles::is_target() && tool_window(result)) return nullptr;
+    if (result && roles::is_target() && tool_window(result))
+        return nullptr;
     return result;
 }
 
@@ -262,44 +323,60 @@ struct install_entry {
 };
 
 install_entry entries[] = {
-    {&query_window, "NtUserQueryWindow", reinterpret_cast<void*>(&handler_query_window)},
-    {&find_window_ex, "NtUserFindWindowEx", reinterpret_cast<void*>(&handler_find_window_ex)},
-    {&build_hwnd_list, "NtUserBuildHwndList", reinterpret_cast<void*>(&handler_build_hwnd_list)},
-    {&get_foreground_window, "NtUserGetForegroundWindow", reinterpret_cast<void*>(&handler_get_foreground_window)},
-    {&window_from_point, "NtUserWindowFromPoint", reinterpret_cast<void*>(&handler_window_from_point)},
+    {&query_window, "NtUserQueryWindow",
+     reinterpret_cast<void*>(&handler_query_window)},
+    {&find_window_ex, "NtUserFindWindowEx",
+     reinterpret_cast<void*>(&handler_find_window_ex)},
+    {&build_hwnd_list, "NtUserBuildHwndList",
+     reinterpret_cast<void*>(&handler_build_hwnd_list)},
+    {&get_foreground_window, "NtUserGetForegroundWindow",
+     reinterpret_cast<void*>(&handler_get_foreground_window)},
+    {&window_from_point, "NtUserWindowFromPoint",
+     reinterpret_cast<void*>(&handler_window_from_point)},
 };
 }  // namespace
 
 bool installed() {
     for (const auto& entry : entries)
-        if (entry.slot->id) return true;
+        if (entry.slot->id)
+            return true;
     return false;
 }
 
 ULONG hook_count() {
     uint32_t count = 0;
     for (const auto& entry : entries)
-        if (entry.slot->id) ++count;
+        if (entry.slot->id)
+            ++count;
     return count;
 }
 
 NTSTATUS install() {
-    if (installed()) return STATUS_SUCCESS;
+    if (installed())
+        return STATUS_SUCCESS;
     const auto module = find_module("win32kfull.sys");
-    if (!module.base || !module.size) return STATUS_NOT_FOUND;
+    if (!module.base || !module.size)
+        return STATUS_NOT_FOUND;
     win32kfull_base = module.base;
     win32kfull_size = module.size;
 
     uint32_t count = 0;
-    for (uint32_t index = 0; index < sizeof(entries) / sizeof(entries[0]); ++index) {
+    for (uint32_t index = 0; index < sizeof(entries) / sizeof(entries[0]);
+         ++index) {
         auto& entry = entries[index];
-        if (entry.slot->id) { ++count; continue; }
+        if (entry.slot->id) {
+            ++count;
+            continue;
+        }
         // Bring-up knob: WindowHookMask selects which window services to arm.
-        if (!service_mask_allows(L"WindowHookMask", index)) continue;
+        if (!service_mask_allows(L"WindowHookMask", index))
+            continue;
         // Resolve by name from the export table and refuse anything that does
         // not land inside the image we just located.
-        auto* address = find_export(win32kfull_base, entry.name, win32kfull_size);
-        if (!address || !in_module(address)) continue;
+        auto* address =
+            find_export(win32kfull_base, entry.name, win32kfull_size);
+        if (!address || !in_module(address))
+            continue;
         // The patch itself is built by prepare_hook: only it knows the literal
         // slot the jump reads through.
         uint8_t patch[max_patch]{};
@@ -316,8 +393,8 @@ NTSTATUS install() {
         // original runs without any page view having to be changed and the
         // call cannot re-enter its own hook if the thread moves to another
         // processor while it is inside the call.
-        *entry.slot->original = prepared.trampoline ? prepared.trampoline
-                                                    : address;
+        *entry.slot->original =
+            prepared.trampoline ? prepared.trampoline : address;
         if (NT_SUCCESS(arm_hook(prepared))) {
             ++count;
             continue;
@@ -330,7 +407,8 @@ NTSTATUS install() {
 
 void remove() {
     for (auto& entry : entries) {
-        if (!entry.slot->id) continue;
+        if (!entry.slot->id)
+            continue;
         remove_hook(entry.slot->id);
         entry.slot->id = 0;
         *entry.slot->original = nullptr;

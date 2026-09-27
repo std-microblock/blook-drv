@@ -44,9 +44,9 @@ uint32_t pid_of(PEPROCESS process) {
 NTSTATUS check_page(void* address, bool require_executable) {
     MEMORY_BASIC_INFORMATION info{};
     SIZE_T returned{};
-    auto status =
-        ZwQueryVirtualMemory(ZwCurrentProcess(), address, MemoryBasicInformation,
-                             &info, sizeof(info), &returned);
+    auto status = ZwQueryVirtualMemory(ZwCurrentProcess(), address,
+                                       MemoryBasicInformation, &info,
+                                       sizeof(info), &returned);
     if (!NT_SUCCESS(status))
         return status;
     if (info.State != MEM_COMMIT || (info.Protect & PAGE_GUARD))
@@ -111,8 +111,8 @@ void shutdown() {
     store = nullptr;
 }
 
-NTSTATUS arm(uint32_t pid, uint64_t token, uint64_t address,
-             uint64_t dump_base, uint64_t dump_size, uint64_t& id) {
+NTSTATUS arm(uint32_t pid, uint64_t token, uint64_t address, uint64_t dump_base,
+             uint64_t dump_size, uint64_t& id) {
     if (!store || KeGetCurrentIrql() != PASSIVE_LEVEL || !token)
         return STATUS_INVALID_PARAMETER;
     if (!hv::ghv.running)
@@ -234,8 +234,8 @@ NTSTATUS fetch(uint64_t id, uint64_t token, uint64_t offset, uint8_t* out,
         result.hit_cr3 = record->hit_cr3;
         if (offset < entry->buffer_size && out) {
             const auto available = entry->buffer_size - offset;
-            const auto take = length < available ? length
-                                                 : static_cast<uint32_t>(available);
+            const auto take =
+                length < available ? length : static_cast<uint32_t>(available);
             RtlCopyMemory(out, entry->buffer + offset, take);
             result.copied = take;
         }

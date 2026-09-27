@@ -1,4 +1,5 @@
-// Adapted from jonomango/hv (MIT). See LICENSES/jonomango-hv.txt and docs/REFERENCES.md.
+// Adapted from jonomango/hv (MIT). See LICENSES/jonomango-hv.txt and
+// docs/REFERENCES.md.
 #pragma once
 
 #include "arch.h"
@@ -9,9 +10,9 @@ namespace hv {
 
 // TODO: move to ia32?
 struct vmx_msr_entry {
-  uint32_t msr_idx;
-  uint32_t _reserved;
-  uint64_t msr_data;
+    uint32_t msr_idx;
+    uint32_t _reserved;
+    uint64_t msr_data;
 };
 
 // INVEPT instruction
@@ -122,10 +123,12 @@ void inject_hw_exception(uint32_t vector);
 void inject_hw_exception(uint32_t vector, uint32_t error);
 
 // enable/disable vm-exits when the guest tries to read the specified MSR
-void enable_exit_for_msr_read(vmx_msr_bitmap& bitmap, uint32_t msr, bool enable_exiting);
+void enable_exit_for_msr_read(vmx_msr_bitmap& bitmap, uint32_t msr,
+                              bool enable_exiting);
 
 // enable/disable vm-exits when the guest tries to write to the specified MSR
-void enable_exit_for_msr_write(vmx_msr_bitmap& bitmap, uint32_t msr, bool enable_exiting);
+void enable_exit_for_msr_write(vmx_msr_bitmap& bitmap, uint32_t msr,
+                               bool enable_exiting);
 
 // enable MTF exiting
 void enable_monitor_trap_flag();
@@ -133,7 +136,6 @@ void enable_monitor_trap_flag();
 // disable MTF exiting
 void disable_monitor_trap_flag();
 
-} // namespace hv
+}  // namespace hv
 
 #include "vmx.inl"
-

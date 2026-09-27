@@ -24,8 +24,12 @@ NTSTATUS activate() {
     return STATUS_SUCCESS;
 }
 
-NTSTATUS activate_maintenance() { return nt::install_core(); }
-void deactivate_maintenance() { nt::remove_core(); }
+NTSTATUS activate_maintenance() {
+    return nt::install_core();
+}
+void deactivate_maintenance() {
+    nt::remove_core();
+}
 
 void deactivate() {
     exclusive_lock guard{profile_lock};
@@ -51,15 +55,21 @@ NTSTATUS enable_windows(bool enable) {
     return STATUS_SUCCESS;
 }
 
-bool windows_active() { return win32k::installed(); }
+bool windows_active() {
+    return win32k::installed();
+}
 
-ULONG window_hook_count() { return win32k::hook_count(); }
+ULONG window_hook_count() {
+    return win32k::hook_count();
+}
 
 bool active() {
     return profile_active;
 }
 
-void forget_process(uint32_t pid) { nt::forget_process(pid); }
+void forget_process(uint32_t pid) {
+    nt::forget_process(pid);
+}
 
 void pin(uint32_t pid, role value) {
     roles::pin(pid, value);

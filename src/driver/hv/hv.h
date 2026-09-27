@@ -5,7 +5,6 @@
 #include "stats.h"
 namespace hv {
 
-
 inline constexpr uint64_t hypervisor_signature = 0x424c4f4f4b4856ull;
 struct hypervisor {
     struct host_page_tables host_page_tables;
@@ -27,9 +26,9 @@ struct cr_exit_stats {
     uint64_t count[4]{};
     uint64_t length_mask[4]{};
     uint64_t max_length[4]{};
-    uint64_t decoded{};              // instructions read back and decoded
-    uint64_t decoded_mismatch{};     // decoded length != reported length
-    uint64_t decoded_failed{};       // could not be read or decoded
+    uint64_t decoded{};           // instructions read back and decoded
+    uint64_t decoded_mismatch{};  // decoded length != reported length
+    uint64_t decoded_failed{};    // could not be read or decoded
 };
 extern cr_exit_stats cr_stats;
 
@@ -61,12 +60,12 @@ struct fault_trace_record {
     // The vcpu pointer identifies the logical processor instead.
     uint64_t vcpu{};
     uint32_t vector{};
-    uint32_t type{};           // interruption type reported by the vm-exit info
+    uint32_t type{};  // interruption type reported by the vm-exit info
     // Raw IDT-vectoring information: non-zero valid bit means the guest was in
     // the middle of delivering another event when this one was raised, which is
     // the case the double-fault synthesis exists for.
     uint32_t idt_vectoring{};
-    uint32_t double_fault{};   // 1 when this fault was turned into a #DF
+    uint32_t double_fault{};  // 1 when this fault was turned into a #DF
 };
 extern fault_trace_record fault_trace[fault_trace_count];
 extern volatile uint64_t fault_trace_total;
@@ -86,10 +85,10 @@ struct length_mismatch_record {
     uint64_t sequence{};
     uint64_t rip{};
     uint64_t exit_qualification{};
-    uint32_t decoded{};          // 0 when the decode failed
-    uint32_t reported{};         // VMCS_VMEXIT_INSTRUCTION_LENGTH
-    uint32_t exit_reason{};      // VMCS_EXIT_REASON, low 16 bits
-    uint32_t access_type{};      // MOV CR access type when applicable
+    uint32_t decoded{};      // 0 when the decode failed
+    uint32_t reported{};     // VMCS_VMEXIT_INSTRUCTION_LENGTH
+    uint32_t exit_reason{};  // VMCS_EXIT_REASON, low 16 bits
+    uint32_t access_type{};  // MOV CR access type when applicable
     uint8_t bytes[24]{};
 };
 extern length_mismatch_record length_mismatches[length_mismatch_capacity];
@@ -120,7 +119,8 @@ inline void record_root_fault(uint32_t const vector, uint32_t const error,
                               uint64_t const rip, uint64_t const rsp,
                               uint64_t const r10, uint64_t const r11) {
     auto const total = ++root_fault_total;
-    if (total > root_fault_capacity) return;
+    if (total > root_fault_capacity)
+        return;
     auto& record = root_faults[total - 1];
     record.sequence = total;
     record.rip = rip;
@@ -133,12 +133,14 @@ inline void record_root_fault(uint32_t const vector, uint32_t const error,
 extern volatile uint64_t length_mismatch_total;
 
 // Called from vm-exit (root mode): no kernel API, no allocation, bounded work.
-inline void record_length_mismatch(uint64_t const rip, uint64_t const qualification,
-                                   uint32_t const decoded, uint32_t const reported,
-                                   uint32_t const exit_reason, uint32_t const access_type,
-                                   uint8_t const* const bytes, uint32_t const count) {
+inline void record_length_mismatch(
+    uint64_t const rip, uint64_t const qualification, uint32_t const decoded,
+    uint32_t const reported, uint32_t const exit_reason,
+    uint32_t const access_type, uint8_t const* const bytes,
+    uint32_t const count) {
     auto const total = ++length_mismatch_total;
-    if (total > length_mismatch_capacity) return;
+    if (total > length_mismatch_capacity)
+        return;
     auto& record = length_mismatches[total - 1];
     record.sequence = total;
     record.rip = rip;
@@ -156,7 +158,8 @@ void initialize_fault_trace();
 bool fault_trace_enabled();
 // 1 = record and reflect, 2 = reflect only (bisecting the diagnostic itself).
 bool fault_trace_records();
-// Lifecycle and broadcast APIs require PASSIVE_LEVEL and external serialization.
+// Lifecycle and broadcast APIs require PASSIVE_LEVEL and external
+// serialization.
 [[nodiscard]] NTSTATUS start();
 void stop();
 [[nodiscard]] bool install(const blook::hook_spec& spec);
@@ -174,4 +177,4 @@ void remove_watch(uint64_t id);
 bool begin_window(uint64_t id);
 bool end_window(uint64_t id);
 
-}
+}  // namespace hv

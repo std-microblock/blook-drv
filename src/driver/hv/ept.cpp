@@ -402,7 +402,8 @@ void remove_ept_hook(vcpu_ept_data& ept, uint64_t id) {
     hook.active = false;
     hook.group = unused_group;
     ept.window_depth[index] = 0;
-    if (index < hook_diag_slots) g_hook_diag[index].active = 0;
+    if (index < hook_diag_slots)
+        g_hook_diag[index].active = 0;
     if (group_empty(ept, group_index)) {
         ept.groups[group_index].active = false;
         // The last hook of the page is gone: execute straight from the

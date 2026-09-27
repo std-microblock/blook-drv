@@ -10,7 +10,8 @@ inline constexpr size_t host_stack_size = 0x8000;
 inline constexpr uint16_t guest_vpid = 1;
 struct vcpu_cached_data {
     uint64_t max_phys_addr{};
-    uint64_t vmx_cr0_fixed0{}, vmx_cr0_fixed1{}, vmx_cr4_fixed0{}, vmx_cr4_fixed1{};
+    uint64_t vmx_cr0_fixed0{}, vmx_cr0_fixed1{}, vmx_cr4_fixed0{},
+        vmx_cr4_fixed1{};
     uint64_t xcr0_unsupported_mask{};
     ia32_feature_control_register feature_control{};
     ia32_vmx_misc_register vmx_misc{};
@@ -22,11 +23,12 @@ struct vcpu_cached_data {
     bool perf_global_ctrl_supported{};
 };
 struct vcpu {
-    alignas(4096) ::vmxon vmxon;
-    alignas(4096) ::vmcs vmcs;
+    alignas(4096)::vmxon vmxon;
+    alignas(4096)::vmcs vmcs;
     alignas(4096) vmx_msr_bitmap msr_bitmap;
     alignas(4096) uint8_t host_stack[host_stack_size];
-    alignas(4096) segment_descriptor_interrupt_gate_64 host_idt[host_idt_descriptor_count];
+    alignas(4096) segment_descriptor_interrupt_gate_64
+        host_idt[host_idt_descriptor_count];
     alignas(4096) segment_descriptor_32 host_gdt[host_gdt_descriptor_count];
     alignas(4096) task_state_segment_64 host_tss;
     vcpu_ept_data ept;
@@ -91,4 +93,4 @@ struct cpu_diagnostic {
 };
 void diagnose_cpu(uint32_t index, cpu_diagnostic* out);
 [[noreturn]] void fatal_root_error();
-}
+}  // namespace hv

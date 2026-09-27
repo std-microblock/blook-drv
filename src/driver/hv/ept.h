@@ -2,12 +2,9 @@
 #include <ia32.hpp>
 #include "stats.h"
 
-
-
 #include "policy/hook.hpp"
 
 namespace hv {
-
 
 inline constexpr size_t ept_pd_count = 512;
 inline constexpr size_t ept_split_count = 160;

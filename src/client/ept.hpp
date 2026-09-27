@@ -241,9 +241,9 @@ class watch final {
         auto request = ipc::request<ipc::DumpRequest>();
         request.id = id_;
         ipc::DumpResponse response{};
-        auto status = connection_->call(ipc::IOCTL_BLOOK_DUMP, &request,
-                                        sizeof(request), &response,
-                                        sizeof(response));
+        auto status =
+            connection_->call(ipc::IOCTL_BLOOK_DUMP, &request, sizeof(request),
+                              &response, sizeof(response));
         if (!status)
             return std::unexpected(status.error());
         return watch_hit{.rip = response.hit_rip,
@@ -267,9 +267,9 @@ class watch final {
         request.offset = offset;
         request.length = static_cast<uint32_t>(out.size());
         ipc::DumpResponse response{};
-        auto status = connection_->call(ipc::IOCTL_BLOOK_DUMP, &request,
-                                        sizeof(request), &response,
-                                        sizeof(response));
+        auto status =
+            connection_->call(ipc::IOCTL_BLOOK_DUMP, &request, sizeof(request),
+                              &response, sizeof(response));
         if (!status)
             return std::unexpected(status.error());
         if (response.state != blook::watch_hit)
@@ -295,12 +295,11 @@ class watch final {
         uint64_t offset = 0;
         while (offset < hit->total) {
             std::array<std::byte, ipc::dump_chunk_size> chunk{};
-            const auto copied =
-                read(offset, std::span{chunk}.first(
-                                 static_cast<size_t>(
-                                     (hit->total - offset < chunk.size())
-                                         ? hit->total - offset
-                                         : chunk.size())));
+            const auto copied = read(
+                offset,
+                std::span{chunk}.first(static_cast<size_t>(
+                    (hit->total - offset < chunk.size()) ? hit->total - offset
+                                                         : chunk.size())));
             if (!copied)
                 return std::unexpected(copied.error());
             if (!*copied)
@@ -463,12 +462,10 @@ class session final {
     // physical memory and keeps it fetchable via the returned watch. This is
     // the anti self-decrypting-shell path: the dump does not go through any
     // user-mode API, so the sample cannot see it coming.
-    [[nodiscard]] result<watch> watch_execute(void* address, void* dump_base,
-                                              size_t dump_size,
-                                              pid target = pid::current())
-        const {
-        if (!address || !dump_base || !dump_size ||
-            dump_size > blook::max_dump)
+    [[nodiscard]] result<watch> watch_execute(
+        void* address, void* dump_base, size_t dump_size,
+        pid target = pid::current()) const {
+        if (!address || !dump_base || !dump_size || dump_size > blook::max_dump)
             return std::unexpected(std::error_code{ERROR_INVALID_PARAMETER,
                                                    std::system_category()});
         auto request = ipc::request<ipc::WatchRequest>();
@@ -488,11 +485,9 @@ class session final {
     // Module-relative form: the watched address is base + offset, the dump
     // starts at base + dump_offset. With this the caller only has to know the
     // module's base in the target process and the RVAs of interest.
-    [[nodiscard]] result<watch> watch_execute_at(void* base, size_t offset,
-                                                 size_t dump_offset,
-                                                 size_t dump_size,
-                                                 pid target = pid::current())
-        const {
+    [[nodiscard]] result<watch> watch_execute_at(
+        void* base, size_t offset, size_t dump_offset, size_t dump_size,
+        pid target = pid::current()) const {
         if (!base || !dump_size || dump_size > blook::max_dump)
             return std::unexpected(std::error_code{ERROR_INVALID_PARAMETER,
                                                    std::system_category()});

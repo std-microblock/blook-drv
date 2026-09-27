@@ -42,11 +42,17 @@ static_assert(std::is_same_v<decltype(&generate_handler), GenerateKey>);
 
 struct Algorithm {
     BCRYPT_ALG_HANDLE value = nullptr;
-    ~Algorithm() { if (value) BCryptCloseAlgorithmProvider(value, 0); }
+    ~Algorithm() {
+        if (value)
+            BCryptCloseAlgorithmProvider(value, 0);
+    }
 };
 struct Key {
     BCRYPT_KEY_HANDLE value = nullptr;
-    ~Key() { if (value) BCryptDestroyKey(value); }
+    ~Key() {
+        if (value)
+            BCryptDestroyKey(value);
+    }
 };
 
 ::testing::AssertionResult cbc_roundtrip() {
@@ -54,20 +60,24 @@ struct Key {
     auto status = BCryptOpenAlgorithmProvider(&algorithm.value,
                                               BCRYPT_AES_ALGORITHM, nullptr, 0);
     if (status < 0)
-        return ::testing::AssertionFailure() << "BCryptOpenAlgorithmProvider: " << status;
+        return ::testing::AssertionFailure()
+               << "BCryptOpenAlgorithmProvider: " << status;
     status = BCryptSetProperty(
         algorithm.value, BCRYPT_CHAINING_MODE,
         reinterpret_cast<PUCHAR>(const_cast<wchar_t*>(BCRYPT_CHAIN_MODE_CBC)),
-        static_cast<ULONG>((std::wcslen(BCRYPT_CHAIN_MODE_CBC) + 1) * sizeof(wchar_t)), 0);
+        static_cast<ULONG>((std::wcslen(BCRYPT_CHAIN_MODE_CBC) + 1) *
+                           sizeof(wchar_t)),
+        0);
     if (status < 0)
         return ::testing::AssertionFailure() << "BCryptSetProperty: " << status;
 
     ULONG object_size = 0, returned = 0;
     status = BCryptGetProperty(algorithm.value, BCRYPT_OBJECT_LENGTH,
-                              reinterpret_cast<PUCHAR>(&object_size),
-                              sizeof(object_size), &returned, 0);
+                               reinterpret_cast<PUCHAR>(&object_size),
+                               sizeof(object_size), &returned, 0);
     if (status < 0 || returned != sizeof(object_size) || object_size == 0)
-        return ::testing::AssertionFailure() << "BCRYPT_OBJECT_LENGTH: " << status;
+        return ::testing::AssertionFailure()
+               << "BCRYPT_OBJECT_LENGTH: " << status;
     // The key object must outlive the key handle, including early returns.
     std::vector<UCHAR> object(object_size);
     Key key;
@@ -79,39 +89,50 @@ struct Key {
     }
     for (size_t i = 0; i < plaintext.size(); ++i)
         plaintext[i] = static_cast<UCHAR>(i * 3 + 1);
-    status = BCryptGenerateSymmetricKey(algorithm.value, &key.value,
-                                        object.data(), object_size, secret.data(),
-                                        static_cast<ULONG>(secret.size()), 0);
+    status = BCryptGenerateSymmetricKey(
+        algorithm.value, &key.value, object.data(), object_size, secret.data(),
+        static_cast<ULONG>(secret.size()), 0);
     if (status < 0)
-        return ::testing::AssertionFailure() << "BCryptGenerateSymmetricKey: " << status;
+        return ::testing::AssertionFailure()
+               << "BCryptGenerateSymmetricKey: " << status;
 
     // BCryptEncrypt mutates its IV. Decryption needs the same INITIAL IV,
     // not the IV left behind by encryption.
     auto encrypt_iv = initial_iv;
     auto decrypt_iv = initial_iv;
     ULONG encrypted_size = 0, decrypted_size = 0;
-    status = BCryptEncrypt(key.value, plaintext.data(), static_cast<ULONG>(plaintext.size()),
-                           nullptr, encrypt_iv.data(), static_cast<ULONG>(encrypt_iv.size()),
-                           ciphertext.data(), static_cast<ULONG>(ciphertext.size()), &encrypted_size, 0);
+    status = BCryptEncrypt(
+        key.value, plaintext.data(), static_cast<ULONG>(plaintext.size()),
+        nullptr, encrypt_iv.data(), static_cast<ULONG>(encrypt_iv.size()),
+        ciphertext.data(), static_cast<ULONG>(ciphertext.size()),
+        &encrypted_size, 0);
     if (status < 0 || encrypted_size != plaintext.size())
-        return ::testing::AssertionFailure() << "BCryptEncrypt: " << status
-                                             << ", length=" << encrypted_size;
-    status = BCryptDecrypt(key.value, ciphertext.data(), encrypted_size,
-                           nullptr, decrypt_iv.data(), static_cast<ULONG>(decrypt_iv.size()),
-                           recovered.data(), static_cast<ULONG>(recovered.size()), &decrypted_size, 0);
-    if (status < 0 || decrypted_size != plaintext.size() || recovered != plaintext)
-        return ::testing::AssertionFailure() << "BCryptDecrypt/roundtrip: " << status
-                                             << ", length=" << decrypted_size;
+        return ::testing::AssertionFailure()
+               << "BCryptEncrypt: " << status << ", length=" << encrypted_size;
+    status =
+        BCryptDecrypt(key.value, ciphertext.data(), encrypted_size, nullptr,
+                      decrypt_iv.data(), static_cast<ULONG>(decrypt_iv.size()),
+                      recovered.data(), static_cast<ULONG>(recovered.size()),
+                      &decrypted_size, 0);
+    if (status < 0 || decrypted_size != plaintext.size() ||
+        recovered != plaintext)
+        return ::testing::AssertionFailure()
+               << "BCryptDecrypt/roundtrip: " << status
+               << ", length=" << decrypted_size;
     return ::testing::AssertionSuccess();
 }
 
 void* allocate_near(const void* entry) {
     const auto address = reinterpret_cast<uintptr_t>(entry);
-    for (uintptr_t distance = 0x10000; distance < 0x10000000; distance += 0x10000) {
-        if (address <= distance) break;
-        auto* candidate = reinterpret_cast<void*>((address - distance) & ~uintptr_t{0xffff});
-        if (auto* page = VirtualAlloc(candidate, 0x1000, MEM_RESERVE | MEM_COMMIT,
-                                      PAGE_EXECUTE_READWRITE))
+    for (uintptr_t distance = 0x10000; distance < 0x10000000;
+         distance += 0x10000) {
+        if (address <= distance)
+            break;
+        auto* candidate =
+            reinterpret_cast<void*>((address - distance) & ~uintptr_t{0xffff});
+        if (auto* page =
+                VirtualAlloc(candidate, 0x1000, MEM_RESERVE | MEM_COMMIT,
+                             PAGE_EXECUTE_READWRITE))
             return page;
     }
     return nullptr;
@@ -122,12 +143,12 @@ void* allocate_near(const void* entry) {
 // generate: mov r11,rsp; mov [r11+8],rbx
 // They have no PC-relative operands and can be copied verbatim. This is NOT an
 // instruction decoder or a general relocation scheme. Any other build skips.
-constexpr std::array<UCHAR, 10> property_prologue{
-    0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x6c, 0x24, 0x10};
-constexpr std::array<UCHAR, 7> generate_prologue{
-    0x4c, 0x8b, 0xdc, 0x49, 0x89, 0x5b, 0x08};
+constexpr std::array<UCHAR, 10> property_prologue{0x48, 0x89, 0x5c, 0x24, 0x08,
+                                                  0x48, 0x89, 0x6c, 0x24, 0x10};
+constexpr std::array<UCHAR, 7> generate_prologue{0x4c, 0x8b, 0xdc, 0x49,
+                                                 0x89, 0x5b, 0x08};
 
-template<class Function>
+template <class Function>
 struct EntryHook {
     Function& original;
     void* trampoline = nullptr;
@@ -143,46 +164,58 @@ struct EntryHook {
             if (!removed) {
                 // Never free code/literals that a still-installed hook can use.
                 // Report failure and retain mappings until process exit.
-                ADD_FAILURE() << "Hook removal failed; retaining executable storage: "
-                              << removed.error().message();
+                ADD_FAILURE()
+                    << "Hook removal failed; retaining executable storage: "
+                    << removed.error().message();
                 return;
             }
         }
         original = nullptr;
-        if (literal) VirtualFree(literal, 0, MEM_RELEASE);
-        if (trampoline) VirtualFree(trampoline, 0, MEM_RELEASE);
+        if (literal)
+            VirtualFree(literal, 0, MEM_RELEASE);
+        if (trampoline)
+            VirtualFree(trampoline, 0, MEM_RELEASE);
     }
 
-    template<size_t N>
+    template <size_t N>
     ::testing::AssertionResult arm(blook::client::session& session, void* entry,
-                                  Function handler, const std::array<UCHAR, N>& expected) {
+                                   Function handler,
+                                   const std::array<UCHAR, N>& expected) {
         static_assert(N >= blook::jump_patch_length);
         if (std::memcmp(entry, expected.data(), N) != 0)
-            return ::testing::AssertionFailure() << "Prologue changed after preflight";
+            return ::testing::AssertionFailure()
+                   << "Prologue changed after preflight";
         trampoline = allocate_near(entry);
         if (!trampoline)
-            return ::testing::AssertionFailure() << "Trampoline allocation failed: " << GetLastError();
+            return ::testing::AssertionFailure()
+                   << "Trampoline allocation failed: " << GetLastError();
         auto* code = static_cast<UCHAR*>(trampoline);
         std::memcpy(code, entry, N);
-        // jmp qword ptr [rip+0]; absolute continuation in an unhooked allocation.
+        // jmp qword ptr [rip+0]; absolute continuation in an unhooked
+        // allocation.
         constexpr UCHAR jump[]{0xff, 0x25, 0, 0, 0, 0};
         std::memcpy(code + N, jump, sizeof(jump));
         const auto continuation = reinterpret_cast<uintptr_t>(entry) + N;
-        std::memcpy(code + N + sizeof(jump), &continuation, sizeof(continuation));
+        std::memcpy(code + N + sizeof(jump), &continuation,
+                    sizeof(continuation));
         if (!FlushInstructionCache(GetCurrentProcess(), code, N + 14))
-            return ::testing::AssertionFailure() << "FlushInstructionCache failed: " << GetLastError();
+            return ::testing::AssertionFailure()
+                   << "FlushInstructionCache failed: " << GetLastError();
         literal = allocate_near(entry);
         if (!literal)
-            return ::testing::AssertionFailure() << "Literal allocation failed: " << GetLastError();
+            return ::testing::AssertionFailure()
+                   << "Literal allocation failed: " << GetLastError();
         const auto destination = reinterpret_cast<uintptr_t>(handler);
         std::memcpy(literal, &destination, sizeof(destination));
         const auto patch = blook::client::entry_jump(entry, literal);
         if (!patch)
-            return ::testing::AssertionFailure() << "Entry literal is out of rel32 range";
+            return ::testing::AssertionFailure()
+                   << "Entry literal is out of rel32 range";
         original = reinterpret_cast<Function>(trampoline);
         auto result = session.patch(entry, *patch);
         if (!result)
-            return ::testing::AssertionFailure() << "session.patch: " << result.error().message();
+            return ::testing::AssertionFailure()
+                   << "session.patch: " << result.error().message();
         installed.emplace(std::move(*result));
         return ::testing::AssertionSuccess();
     }
@@ -194,8 +227,10 @@ TEST(ImagePage, HostBcryptCbcRoundtrip) {
 
 TEST(ImagePage, LiveTwoBcryptHooksOnSameImagePage) {
     char live[2]{};
-    if (GetEnvironmentVariableA("BLOOK_EPT_LIVE", live, sizeof(live)) != 1 || live[0] != '1')
-        GTEST_SKIP() << "Set BLOOK_EPT_LIVE=1 to execute the live EPT regression";
+    if (GetEnvironmentVariableA("BLOOK_EPT_LIVE", live, sizeof(live)) != 1 ||
+        live[0] != '1')
+        GTEST_SKIP()
+            << "Set BLOOK_EPT_LIVE=1 to execute the live EPT regression";
     if constexpr (sizeof(void*) != 8)
         GTEST_SKIP() << "This regression requires x64 prologues";
 
@@ -203,16 +238,22 @@ TEST(ImagePage, LiveTwoBcryptHooksOnSameImagePage) {
     // reference and therefore does not require FreeLibrary.
     const auto module = GetModuleHandleW(L"bcrypt.dll");
     ASSERT_NE(module, nullptr);
-    auto* property = reinterpret_cast<void*>(GetProcAddress(module, "BCryptSetProperty"));
-    auto* generate = reinterpret_cast<void*>(GetProcAddress(module, "BCryptGenerateSymmetricKey"));
+    auto* property =
+        reinterpret_cast<void*>(GetProcAddress(module, "BCryptSetProperty"));
+    auto* generate = reinterpret_cast<void*>(
+        GetProcAddress(module, "BCryptGenerateSymmetricKey"));
     ASSERT_NE(property, nullptr);
     ASSERT_NE(generate, nullptr);
     if ((reinterpret_cast<uintptr_t>(property) >> 12) !=
         (reinterpret_cast<uintptr_t>(generate) >> 12))
-        GTEST_SKIP() << "This bcrypt build does not place both exports on one 4 KiB page";
-    if (std::memcmp(property, property_prologue.data(), property_prologue.size()) != 0 ||
-        std::memcmp(generate, generate_prologue.data(), generate_prologue.size()) != 0)
-        GTEST_SKIP() << "Unsupported bcrypt prologue; no relocation is attempted";
+        GTEST_SKIP() << "This bcrypt build does not place both exports on one "
+                        "4 KiB page";
+    if (std::memcmp(property, property_prologue.data(),
+                    property_prologue.size()) != 0 ||
+        std::memcmp(generate, generate_prologue.data(),
+                    generate_prologue.size()) != 0)
+        GTEST_SKIP()
+            << "Unsupported bcrypt prologue; no relocation is attempted";
 
     ASSERT_TRUE(cbc_roundtrip());
     auto opened = blook::client::session::open();
@@ -223,8 +264,10 @@ TEST(ImagePage, LiveTwoBcryptHooksOnSameImagePage) {
     {
         EntryHook<SetProperty> property_hook(original_property);
         EntryHook<GenerateKey> generate_hook(original_generate);
-        ASSERT_TRUE(property_hook.arm(session, property, &property_handler, property_prologue));
-        ASSERT_TRUE(generate_hook.arm(session, generate, &generate_handler, generate_prologue));
+        ASSERT_TRUE(property_hook.arm(session, property, &property_handler,
+                                      property_prologue));
+        ASSERT_TRUE(generate_hook.arm(session, generate, &generate_handler,
+                                      generate_prologue));
         for (int iteration = 0; iteration < 21; ++iteration) {
             SCOPED_TRACE(iteration);
             ASSERT_TRUE(cbc_roundtrip());
@@ -237,11 +280,14 @@ TEST(ImagePage, LiveTwoBcryptHooksOnSameImagePage) {
     }
     // Exercise the original image again after the hooks and trampoline mappings
     // have been removed; neither handler should be entered anymore.
-    const auto properties_before = property_hits.load(std::memory_order_relaxed);
-    const auto generations_before = generate_hits.load(std::memory_order_relaxed);
+    const auto properties_before =
+        property_hits.load(std::memory_order_relaxed);
+    const auto generations_before =
+        generate_hits.load(std::memory_order_relaxed);
     ASSERT_TRUE(cbc_roundtrip());
     EXPECT_EQ(property_hits.load(std::memory_order_relaxed), properties_before);
-    EXPECT_EQ(generate_hits.load(std::memory_order_relaxed), generations_before);
+    EXPECT_EQ(generate_hits.load(std::memory_order_relaxed),
+              generations_before);
 }
 
 }  // namespace

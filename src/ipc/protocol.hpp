@@ -127,12 +127,13 @@ struct ProbeRequest {
 struct ProbeResponse {
     Header header{};
     uint64_t cr3{};
-    uint64_t physical{};         // MmGetPhysicalAddress(address)
+    uint64_t physical{};  // MmGetPhysicalAddress(address)
     uint64_t pid{};
     uint64_t peb{};
-    uint64_t locked_pfn{};       // the way prepare_hook resolves the page
+    uint64_t locked_pfn{};  // the way prepare_hook resolves the page
     uint64_t locked_status{};
-    uint64_t kernel_physical{};  // MmGetPhysicalAddress(&g_stats): does it work here at all
+    uint64_t kernel_physical{};  // MmGetPhysicalAddress(&g_stats): does it work
+                                 // here at all
 };
 
 struct EnableRequest {

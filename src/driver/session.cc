@@ -343,7 +343,8 @@ NTSTATUS control_session(PIRP irp, PIO_STACK_LOCATION stack) {
                     static_cast<uint64_t>(row.shadow_mapped);
                 out->hooks[i].identity_mismatches =
                     static_cast<uint64_t>(row.identity_mismatches);
-                if (out->hooks[i].active) ++out->hook_rows;
+                if (out->hooks[i].active)
+                    ++out->hook_rows;
             }
             irp->IoStatus.Information = sizeof(ipc::StatsResponse);
             return STATUS_SUCCESS;
@@ -364,17 +365,14 @@ NTSTATUS control_session(PIRP irp, PIO_STACK_LOCATION stack) {
             out->cr3 = __readcr3();
             out->physical =
                 MmGetPhysicalAddress(reinterpret_cast<void*>(address)).QuadPart;
-            out->pid =
-                reinterpret_cast<uint64_t>(PsGetCurrentProcessId());
+            out->pid = reinterpret_cast<uint64_t>(PsGetCurrentProcessId());
             out->peb = reinterpret_cast<uint64_t>(
                 PsGetProcessPeb(PsGetCurrentProcess()));
-            out->kernel_physical =
-                MmGetPhysicalAddress(&hv::g_stats).QuadPart;
+            out->kernel_physical = MmGetPhysicalAddress(&hv::g_stats).QuadPart;
             {
                 blook::page_lock lock;
-                const auto status =
-                    lock.acquire(reinterpret_cast<void*>(address), UserMode,
-                                 IoReadAccess);
+                const auto status = lock.acquire(
+                    reinterpret_cast<void*>(address), UserMode, IoReadAccess);
                 out->locked_status =
                     static_cast<uint64_t>(static_cast<uint32_t>(status));
                 out->locked_pfn = NT_SUCCESS(status) ? lock.pfn() : 0;
@@ -482,9 +480,8 @@ NTSTATUS control_session(PIRP irp, PIO_STACK_LOCATION stack) {
             const auto dump_base = request.base + request.dump_base;
             const auto target_pid = request.pid ? request.pid : value->pid;
             uint64_t id{};
-            const auto status =
-                watch::arm(target_pid, value->token, address, dump_base,
-                           request.dump_size, id);
+            const auto status = watch::arm(target_pid, value->token, address,
+                                           dump_base, request.dump_size, id);
             if (NT_SUCCESS(status)) {
                 *static_cast<ipc::WatchResponse*>(buffer) = {id};
                 irp->IoStatus.Information = sizeof(ipc::WatchResponse);

@@ -1,4 +1,5 @@
-// Adapted from jonomango/hv (MIT). See LICENSES/jonomango-hv.txt and docs/REFERENCES.md.
+// Adapted from jonomango/hv (MIT). See LICENSES/jonomango-hv.txt and
+// docs/REFERENCES.md.
 #pragma once
 
 #include <intrin.h>
@@ -10,7 +11,7 @@ extern "C" {
 void _sgdt(segment_descriptor_register_64* gdtr);
 void _lgdt(segment_descriptor_register_64* gdtr);
 
-} // extern "C"
+}  // extern "C"
 
 namespace hv {
 
@@ -32,5 +33,4 @@ void write_gs(uint16_t selector);
 void write_tr(uint16_t selector);
 void write_ldtr(uint16_t selector);
 
-} // namespace hv
-
+}  // namespace hv
