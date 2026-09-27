@@ -246,6 +246,7 @@ Remove-Item Env:BLOOK_EPT_LIVE
 | `blook-ept-smoke` | 2 | 实际并发执行与写后 refresh/撤销 |
 | `blook-live-watch` | 3 | pending、精确 dump、one-shot 执行与清理 |
 | `blook-live-cow` | 1 | 真实 image 页保护变化后的 hook rebind |
+| `blook-live-dormant` | 3 | 非可执行（RW）页上 hook/watch 的休眠注册、RX 变更时武装、休眠期撤销 |
 | `blook-session-smoke` | 6 | 句柄生命周期、所有权隔离、远程目标退出 |
 | `blook-image-page-tests` | 2 | 无驱动 BCrypt baseline + opt-in 同页双 hook |
 

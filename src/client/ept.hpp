@@ -390,6 +390,12 @@ class session final {
     // (default: this process). The patch must lie within one 4 KiB page; the
     // driver extends it to whole instructions. Non-overlapping patches on the
     // same page coexist and are merged into one shadow page.
+    //
+    // The target page must be committed but does not have to be executable
+    // yet: a patch installed on a non-executable page (e.g. a JIT or
+    // shellcode allocation in its read-write stage) is registered dormant and
+    // arms itself the moment a protection change makes the page executable,
+    // before that VirtualProtect call returns.
     template <byte_range Bytes>
     [[nodiscard]] result<hook> patch(void* address, Bytes&& bytes,
                                      pid target = pid::current()) const {
@@ -462,6 +468,10 @@ class session final {
     // physical memory and keeps it fetchable via the returned watch. This is
     // the anti self-decrypting-shell path: the dump does not go through any
     // user-mode API, so the sample cannot see it coming.
+    //
+    // `address` must be committed but does not have to be executable yet: a
+    // watch armed on a non-executable page is registered dormant and is
+    // published the moment a protection change makes the page executable.
     [[nodiscard]] result<watch> watch_execute(
         void* address, void* dump_base, size_t dump_size,
         pid target = pid::current()) const {

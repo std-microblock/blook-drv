@@ -81,6 +81,19 @@ NTSTATUS rebind_hooks_if_copied(uint32_t pid, const void* base, size_t size);
 uint64_t rebind_count();
 uint64_t rebind_failure_count();
 
+// Deferred arming of dormant hooks. A user hook installed on a page that is
+// committed but not yet executable (a JIT or shellcode allocation in its
+// read-write stage) is registered dormant: it owns an id and its page pins,
+// but nothing is published to the hypervisor and the instruction-boundary
+// decode has not run - the bytes that matter are the ones the page holds when
+// it becomes executable, not the ones it held at install time. The
+// NtProtectVirtualMemory maintenance hook calls this after a successful
+// protection change; every dormant hook of `pid` inside [base, base + size)
+// whose page just became executable is finished (decode, patch, trampoline)
+// and armed before the syscall returns, so no execution slips past unhooked.
+// PASSIVE_LEVEL only (page probing + per-processor install).
+void arm_dormant_hooks(uint32_t pid, const void* base, size_t size);
+
 // Call-original window. Only valid on the logical processor that is currently
 // executing the hook handler, which is exactly how the guest side handlers use
 // it: begin, call the real function, end.

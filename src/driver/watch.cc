@@ -14,6 +14,11 @@ namespace {
 struct watch_entry {
     bool active{};
     bool armed{};
+    // A dormant watch is fully registered (id, pins, buffer, record) but
+    // nothing is published to the hypervisor: its page was not executable at
+    // arm time. The NtProtectVirtualMemory maintenance hook arms it the
+    // moment the page turns executable (see arm_dormant_if_executable).
+    bool dormant{};
     uint64_t token{};
     watch_spec spec{};
     page_lock page;      // watched page: pinned so its PFN cannot drift away
@@ -37,11 +42,14 @@ uint32_t pid_of(PEPROCESS process) {
         reinterpret_cast<uintptr_t>(PsGetProcessId(process)));
 }
 
-// A watched address must be executable *now*: the page has to be fetched
-// through the EPT entry this installs, which is only meaningful for committed
-// memory. (Arming ahead of the loader mapping the page is a "not committed"
-// failure, exactly like check_user_page for hooks.)
-NTSTATUS check_page(void* address, bool require_executable) {
+// A watched address must be committed and not a guard page; executability is
+// *reported*, not required: a page that is not executable yet (a JIT or
+// shellcode allocation in its read-write stage) registers the watch dormant,
+// and the NtProtectVirtualMemory maintenance hook arms it the moment the page
+// turns executable. (Arming ahead of the loader mapping the page is still a
+// "not committed" failure, exactly like check_user_page for hooks.)
+NTSTATUS check_page(void* address, bool& executable) {
+    executable = false;
     MEMORY_BASIC_INFORMATION info{};
     SIZE_T returned{};
     auto status = ZwQueryVirtualMemory(ZwCurrentProcess(), address,
@@ -51,13 +59,10 @@ NTSTATUS check_page(void* address, bool require_executable) {
         return status;
     if (info.State != MEM_COMMIT || (info.Protect & PAGE_GUARD))
         return STATUS_INVALID_PAGE_PROTECTION;
-    if (require_executable) {
-        constexpr auto executable = PAGE_EXECUTE | PAGE_EXECUTE_READ |
-                                    PAGE_EXECUTE_READWRITE |
-                                    PAGE_EXECUTE_WRITECOPY;
-        if (!(info.Protect & executable))
-            return STATUS_INVALID_PAGE_PROTECTION;
-    }
+    constexpr auto executable_mask = PAGE_EXECUTE | PAGE_EXECUTE_READ |
+                                     PAGE_EXECUTE_READWRITE |
+                                     PAGE_EXECUTE_WRITECOPY;
+    executable = (info.Protect & executable_mask) != 0;
     return STATUS_SUCCESS;
 }
 
@@ -65,6 +70,7 @@ void release(watch_entry& entry, bool from_hypervisor) {
     if (entry.armed && from_hypervisor)
         hv::remove_watch(entry.spec.id);
     entry.armed = false;
+    entry.dormant = false;
     entry.active = false;
     if (entry.process) {
         ObDereferenceObject(entry.process);
@@ -143,9 +149,12 @@ NTSTATUS arm(uint32_t pid, uint64_t token, uint64_t address, uint64_t dump_base,
     auto* const page = reinterpret_cast<void*>(address & ~uint64_t{0xfff});
     KAPC_STATE apc{};
     KeStackAttachProcess(process, &apc);
-    status = check_page(reinterpret_cast<void*>(address), true);
+    bool executable = false;
+    bool dump_executable = false;
+    status = check_page(reinterpret_cast<void*>(address), executable);
     if (NT_SUCCESS(status))
-        status = check_page(reinterpret_cast<void*>(dump_base), false);
+        status =
+            check_page(reinterpret_cast<void*>(dump_base), dump_executable);
     if (NT_SUCCESS(status))
         status = slot->page.acquire(page, UserMode, IoReadAccess);
     if (NT_SUCCESS(status))
@@ -193,6 +202,14 @@ NTSTATUS arm(uint32_t pid, uint64_t token, uint64_t address, uint64_t dump_base,
     // Register before arming: a hit published through the record resolves the
     // entry by id, and concurrent fetch/disarm calls take the same lock.
     slot->active = true;
+    if (!executable) {
+        // A page that cannot execute yet cannot be hit either, so nothing is
+        // missed: the watch is registered dormant and armed by the protection
+        // change that makes the page executable.
+        slot->dormant = true;
+        id = spec.id;
+        return STATUS_SUCCESS;
+    }
     if (!hv::install_watch(spec, slot->record)) {
         release(*slot, false);
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -271,13 +288,69 @@ void rebind_if_copied(PEPROCESS process, uint64_t begin, uint64_t end) {
         const auto pfn = fresh.pfn();
         if (!pfn || pfn == entry.spec.pfn)
             continue;
-        hv::remove_watch(entry.spec.id);
+        // A dormant watch owns no hypervisor state yet: it just follows the
+        // page, and arm_dormant_if_executable publishes it once the page can
+        // execute.
+        if (entry.armed)
+            hv::remove_watch(entry.spec.id);
         entry.page.reset();
         entry.page = static_cast<page_lock&&>(fresh);
         entry.spec.pfn = pfn;
+        if (!entry.armed)
+            continue;
         // A failed re-install leaves the entry registered but unarmed; the
         // caller still sees it and can disarm/refetch.
         entry.armed = hv::install_watch(entry.spec, entry.record);
+    }
+    KeUnstackDetachProcess(&apc);
+}
+
+// Deferred arming, the watch counterpart of blook::arm_dormant_hooks: the
+// NtProtectVirtualMemory maintenance hook calls this after every successful
+// protection change, and a dormant watch whose page just became executable is
+// published before the syscall returns. A page that cannot execute cannot be
+// hit, so no execution can slip past unwatched.
+void arm_dormant_if_executable(PEPROCESS process, uint64_t begin,
+                               uint64_t end) {
+    if (!store || KeGetCurrentIrql() != PASSIVE_LEVEL || !process)
+        return;
+    if (!hv::ghv.running)
+        return;
+    const auto pid = pid_of(process);
+    exclusive_lock lock{store->lock};
+    bool candidate = false;
+    for (const auto& entry : store->entries)
+        if (entry.active && entry.dormant && entry.spec.owner_pid == pid &&
+            entry.spec.target >= begin && entry.spec.target < end)
+            candidate = true;
+    if (!candidate)
+        return;
+    KAPC_STATE apc{};
+    KeStackAttachProcess(process, &apc);
+    for (auto& entry : store->entries) {
+        if (!entry.active || !entry.dormant || entry.spec.owner_pid != pid ||
+            entry.spec.target < begin || entry.spec.target >= end)
+            continue;
+        bool executable = false;
+        if (!NT_SUCCESS(check_page(reinterpret_cast<void*>(entry.spec.target),
+                                   executable)) ||
+            !executable)
+            continue;
+        // The backing page may have moved (copy-on-write) while the watch was
+        // dormant: re-resolve it before publishing the PFN.
+        page_lock fresh;
+        auto* const page =
+            reinterpret_cast<void*>(entry.spec.target & ~uint64_t{0xfff});
+        if (!NT_SUCCESS(fresh.acquire(page, UserMode, IoReadAccess)))
+            continue;
+        entry.page = static_cast<page_lock&&>(fresh);
+        entry.spec.pfn = entry.page.pfn();
+        // A failed install leaves the watch dormant; the next protection
+        // change retries.
+        if (hv::install_watch(entry.spec, entry.record)) {
+            entry.armed = true;
+            entry.dormant = false;
+        }
     }
     KeUnstackDetachProcess(&apc);
 }

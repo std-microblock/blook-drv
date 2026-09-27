@@ -10,8 +10,19 @@ namespace blook {
 namespace {
 struct hook_entry {
     bool active{};
+    // A dormant hook is fully registered (id, pins, token) but nothing is
+    // published to the hypervisor: its page was not executable at install
+    // time. The instruction-boundary decode is deferred until the page turns
+    // executable (see arm_dormant_hooks), so spec.length/spec.patch are not
+    // final while this is set.
+    bool dormant{};
     uint64_t token{};
     hook_spec spec{};
+    // The patch exactly as the caller requested it, kept for the deferred
+    // decode: the bytes that matter are the ones the page holds when it
+    // becomes executable, not the ones it held at install time.
+    uint8_t pending_patch[max_patch]{};
+    uint32_t pending_length{};
     page_lock page;  // mapping and PFN of the patched page
     page_lock
         identity;  // pinned per-process identity page (PEB), user hooks only
@@ -34,9 +45,12 @@ hook_entry* find_locked(uint64_t id) {
 }
 
 void release(hook_entry& entry, bool remove_from_hypervisor) {
-    if (entry.active && remove_from_hypervisor)
+    // A dormant hook owns no hypervisor state: the id was never installed.
+    if (entry.active && !entry.dormant && remove_from_hypervisor)
         hv::remove(entry.spec.id);
     entry.active = false;
+    entry.dormant = false;
+    entry.pending_length = 0;
     if (entry.process) {
         ObDereferenceObject(entry.process);
         entry.process = nullptr;
@@ -46,9 +60,14 @@ void release(hook_entry& entry, bool remove_from_hypervisor) {
     entry.spec = {};
 }
 
-// A user hook only makes sense on committed executable memory: patching a page
-// the target never executes would be an unmapped PFN trap rather than a hook.
-NTSTATUS check_user_page(void* target) {
+// A user hook only makes sense on committed, readable memory: patching a page
+// the target cannot read would be an unmapped PFN trap rather than a hook.
+// Executability is *reported*, not required: a page that is not executable
+// yet (a JIT or shellcode allocation in its read-write stage) registers the
+// hook dormant, and the NtProtectVirtualMemory maintenance hook arms it the
+// moment the page turns executable.
+NTSTATUS check_user_page(void* target, bool& executable) {
+    executable = false;
     MEMORY_BASIC_INFORMATION info{};
     SIZE_T returned{};
     auto status =
@@ -58,10 +77,15 @@ NTSTATUS check_user_page(void* target) {
         return status;
     if (info.State != MEM_COMMIT || (info.Protect & PAGE_GUARD))
         return STATUS_INVALID_PAGE_PROTECTION;
-    constexpr auto executable = PAGE_EXECUTE | PAGE_EXECUTE_READ |
-                                PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-    if (!(info.Protect & executable))
+    constexpr auto readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                              PAGE_EXECUTE | PAGE_EXECUTE_READ |
+                              PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    if (!(info.Protect & readable))
         return STATUS_INVALID_PAGE_PROTECTION;
+    constexpr auto executable_mask = PAGE_EXECUTE | PAGE_EXECUTE_READ |
+                                     PAGE_EXECUTE_READWRITE |
+                                     PAGE_EXECUTE_WRITECOPY;
+    executable = (info.Protect & executable_mask) != 0;
     return STATUS_SUCCESS;
 }
 }  // namespace
@@ -346,102 +370,20 @@ namespace {
 // Bring-up: which step of prepare_hook did this attempt reach? Any early
 // return leaves the last value behind, which is the whole point.
 }  // namespace
-NTSTATUS prepare_hook(uint32_t pid, uint64_t token, void* target,
-                      const uint8_t* patch, size_t length,
-                      prepared_hook& prepared, const void* destination) {
-    if (!store || KeGetCurrentIrql() != PASSIVE_LEVEL || !target || !patch)
-        return STATUS_INVALID_PARAMETER;
-    const auto address = reinterpret_cast<uint64_t>(target);
-    if (!valid_patch(address, length))
-        return STATUS_INVALID_PARAMETER;
-    if (!hv::ghv.running)
-        return STATUS_DEVICE_NOT_READY;
 
-    // Everything that consumes hook_spec::original - the hypervisor shadow
-    // copy above all - expects a mapping of the whole page with the in-page
-    // offset preserved: shadow[i] must hold the byte at page offset i, and the
-    // patch belongs at shadow[target & 0xfff]. Locking the *target* instead
-    // returns a mapping whose first byte *is* the target, so the shadow came
-    // out holding the code from the target onward, shifted by the target page
-    // offset. The entry patch still landed correctly (the EPT preserves the
-    // in-page offset), which is why the hook fired and looked healthy while
-    // every other entry point on that page - the other services sharing the
-    // 4 KiB page, and the body of the hooked function itself whenever it was
-    // reached from anywhere but offset zero - executed bytes from the wrong
-    // offset and ended in a return to zero. Lock the page, not the target.
-    auto* const page = reinterpret_cast<void*>(address & ~uint64_t{0xfff});
-
-    hook_spec spec{};
-    hook_entry* slot{};
-    exclusive_lock lock{store->lock};
-    for (auto& entry : store->entries)
-        if (!entry.active) {
-            slot = &entry;
-            break;
-        }
-    if (!slot)
-        return STATUS_QUOTA_EXCEEDED;
-
-    NTSTATUS status = STATUS_SUCCESS;
-    if (pid) {
-        if (!user_address(address))
-            return STATUS_INVALID_ADDRESS;
-        PEPROCESS process{};
-        status = PsLookupProcessByProcessId(ULongToHandle(pid), &process);
-        if (!NT_SUCCESS(status))
-            return status;
-        PVOID peb = PsGetProcessPeb(process);
-        if (!peb) {
-            ObDereferenceObject(process);
-            return STATUS_INVALID_ADDRESS;
-        }
-        KAPC_STATE apc{};
-        KeStackAttachProcess(process, &apc);
-        status = check_user_page(target);
-        if (NT_SUCCESS(status))
-            status = slot->page.acquire(page, UserMode, IoReadAccess);
-        if (NT_SUCCESS(status) &&
-            (reinterpret_cast<uint64_t>(slot->page.data()) & 0xfff))
-            status = STATUS_INVALID_PARAMETER;
-        // Pinning the identity page keeps the root mode translation of that
-        // address valid for as long as the hook lives.
-        if (NT_SUCCESS(status))
-            status = slot->identity.acquire(peb, UserMode, IoReadAccess);
-        KeUnstackDetachProcess(&apc);
-        if (!NT_SUCCESS(status)) {
-            slot->identity.reset();
-            slot->page.reset();
-            ObDereferenceObject(process);
-            return status;
-        }
-        spec.domain = hook_domain::user;
-        spec.owner_pid = pid;
-        spec.address_space = slot->identity.pfn();
-        spec.identity_address = reinterpret_cast<uint64_t>(peb);
-        slot->process = process;
-    } else {
-        if (address < reinterpret_cast<uint64_t>(MmSystemRangeStart))
-            return STATUS_INVALID_ADDRESS;
-        spec.domain = hook_domain::kernel;
-        status = slot->page.acquire(page, KernelMode, IoReadAccess);
-        if (!NT_SUCCESS(status))
-            return status;
-        if (reinterpret_cast<uint64_t>(slot->page.data()) & 0xfff) {
-            slot->page.reset();
-            return STATUS_INVALID_PARAMETER;
-        }
-    }
-
-    const auto pfn = slot->page.pfn();
-    if (store->next_id == 0) {
-        release(*slot, false);
-        return STATUS_INTEGER_OVERFLOW;
-    }
-
-    spec.id = store->next_id++;
-    spec.pfn = pfn;
-    spec.target = address;
-    spec.original = slot->page.data();
+namespace {
+// Everything between "the page is pinned and its PFN known" and "the hook is
+// registered": instruction-boundary decode on the bytes the page holds *now*,
+// page-mate compatibility, patch construction, trampoline. prepare_hook runs
+// it directly when the page is already executable; arm_dormant_hooks runs it
+// when the page turns executable. Running it any earlier would decode bytes a
+// JIT is still going to overwrite. On failure the caller decides what the
+// entry becomes: prepare_hook releases it, the dormant path keeps it dormant
+// so the next protection change retries.
+NTSTATUS finish_preparation(hook_entry& slot, hook_spec& spec,
+                            const uint8_t* patch, size_t length,
+                            const void* destination, prepared_hook& prepared) {
+    const auto address = spec.target;
     // Cover whole instructions: a patch whose length lands in the middle of one
     // makes the processor resume inside it, and a trampoline that replays half
     // an instruction jumps into nowhere (both were observed as a double fault
@@ -453,22 +395,18 @@ NTSTATUS prepare_hook(uint32_t pid, uint64_t token, void* target,
     {
         const auto offset = address & 0xfff;
         const auto* page_code =
-            static_cast<const uint8_t*>(slot->page.data()) + offset;
+            static_cast<const uint8_t*>(slot.page.data()) + offset;
         const auto room = 4096 - offset;
         covered = 0;
         while (covered < length) {
             const auto step = blook::x86::instruction_length(
                 page_code + covered, room - covered);
-            if (!step) {
-                release(*slot, false);
+            if (!step)
                 return STATUS_INVALID_PARAMETER;
-            }
             covered += step;
         }
-        if (covered > max_patch || covered > room) {
-            release(*slot, false);
+        if (covered > max_patch || covered > room)
             return STATUS_INVALID_PARAMETER;
-        }
     }
 
     spec.length = static_cast<uint32_t>(covered);
@@ -480,21 +418,16 @@ NTSTATUS prepare_hook(uint32_t pid, uint64_t token, void* target,
     // final now, which is what makes the range comparison meaningful.
     for (const auto& entry : store->entries)
         if (entry.active && entry.spec.id != spec.id &&
-            !blook::hooks_compatible(entry.spec, spec)) {
-            release(*slot, false);
+            !blook::hooks_compatible(entry.spec, spec))
             return STATUS_OBJECT_NAME_COLLISION;
-        }
     if (destination) {
         // Built here: the id, and with it the literal slot the jump reads
         // through, is only known now. Out of reach means: do not hook.
         auto* const literal = hook_jump_literal(spec.id);
         uint8_t entry[max_patch]{};
-        if (!literal ||
-            !build_jump_patch(entry, address,
-                              reinterpret_cast<uint64_t>(literal))) {
-            release(*slot, false);
+        if (!literal || !build_jump_patch(entry, address,
+                                          reinterpret_cast<uint64_t>(literal)))
             return STATUS_NOT_SUPPORTED;
-        }
         *literal = reinterpret_cast<uint64_t>(destination);
         for (size_t i = 0; i < covered; ++i)
             spec.patch[i] = i < jump_patch_length ? entry[i] : 0x90;
@@ -597,13 +530,144 @@ NTSTATUS prepare_hook(uint32_t pid, uint64_t token, void* target,
         }
     }
 
+    prepared.id = spec.id;
+    prepared.spec = spec;
+    return STATUS_SUCCESS;
+}
+}  // namespace
+
+NTSTATUS prepare_hook(uint32_t pid, uint64_t token, void* target,
+                      const uint8_t* patch, size_t length,
+                      prepared_hook& prepared, const void* destination) {
+    if (!store || KeGetCurrentIrql() != PASSIVE_LEVEL || !target || !patch)
+        return STATUS_INVALID_PARAMETER;
+    const auto address = reinterpret_cast<uint64_t>(target);
+    if (!valid_patch(address, length))
+        return STATUS_INVALID_PARAMETER;
+    if (!hv::ghv.running)
+        return STATUS_DEVICE_NOT_READY;
+
+    // Everything that consumes hook_spec::original - the hypervisor shadow
+    // copy above all - expects a mapping of the whole page with the in-page
+    // offset preserved: shadow[i] must hold the byte at page offset i, and the
+    // patch belongs at shadow[target & 0xfff]. Locking the *target* instead
+    // returns a mapping whose first byte *is* the target, so the shadow came
+    // out holding the code from the target onward, shifted by the target page
+    // offset. The entry patch still landed correctly (the EPT preserves the
+    // in-page offset), which is why the hook fired and looked healthy while
+    // every other entry point on that page - the other services sharing the
+    // 4 KiB page, and the body of the hooked function itself whenever it was
+    // reached from anywhere but offset zero - executed bytes from the wrong
+    // offset and ended in a return to zero. Lock the page, not the target.
+    auto* const page = reinterpret_cast<void*>(address & ~uint64_t{0xfff});
+
+    hook_spec spec{};
+    hook_entry* slot{};
+    exclusive_lock lock{store->lock};
+    for (auto& entry : store->entries)
+        if (!entry.active) {
+            slot = &entry;
+            break;
+        }
+    if (!slot)
+        return STATUS_QUOTA_EXCEEDED;
+
+    NTSTATUS status = STATUS_SUCCESS;
+    bool executable = true;
+    if (pid) {
+        if (!user_address(address))
+            return STATUS_INVALID_ADDRESS;
+        PEPROCESS process{};
+        status = PsLookupProcessByProcessId(ULongToHandle(pid), &process);
+        if (!NT_SUCCESS(status))
+            return status;
+        PVOID peb = PsGetProcessPeb(process);
+        if (!peb) {
+            ObDereferenceObject(process);
+            return STATUS_INVALID_ADDRESS;
+        }
+        KAPC_STATE apc{};
+        KeStackAttachProcess(process, &apc);
+        status = check_user_page(target, executable);
+        if (NT_SUCCESS(status))
+            status = slot->page.acquire(page, UserMode, IoReadAccess);
+        if (NT_SUCCESS(status) &&
+            (reinterpret_cast<uint64_t>(slot->page.data()) & 0xfff))
+            status = STATUS_INVALID_PARAMETER;
+        // Pinning the identity page keeps the root mode translation of that
+        // address valid for as long as the hook lives.
+        if (NT_SUCCESS(status))
+            status = slot->identity.acquire(peb, UserMode, IoReadAccess);
+        KeUnstackDetachProcess(&apc);
+        if (!NT_SUCCESS(status)) {
+            slot->identity.reset();
+            slot->page.reset();
+            ObDereferenceObject(process);
+            return status;
+        }
+        spec.domain = hook_domain::user;
+        spec.owner_pid = pid;
+        spec.address_space = slot->identity.pfn();
+        spec.identity_address = reinterpret_cast<uint64_t>(peb);
+        slot->process = process;
+    } else {
+        if (address < reinterpret_cast<uint64_t>(MmSystemRangeStart))
+            return STATUS_INVALID_ADDRESS;
+        spec.domain = hook_domain::kernel;
+        status = slot->page.acquire(page, KernelMode, IoReadAccess);
+        if (!NT_SUCCESS(status))
+            return status;
+        if (reinterpret_cast<uint64_t>(slot->page.data()) & 0xfff) {
+            slot->page.reset();
+            return STATUS_INVALID_PARAMETER;
+        }
+    }
+
+    const auto pfn = slot->page.pfn();
+    if (store->next_id == 0) {
+        release(*slot, false);
+        return STATUS_INTEGER_OVERFLOW;
+    }
+
+    spec.id = store->next_id++;
+    spec.pfn = pfn;
+    spec.target = address;
+    spec.original = slot->page.data();
+
+    if (!executable) {
+        // A page that cannot execute yet cannot be hooked yet either - but it
+        // cannot be *executed* either, so nothing is missed by registering
+        // now and arming when the page turns executable. Driver-internal
+        // patches are built around a literal slot that nothing would keep
+        // alive meanwhile; they only ever target kernel code, which is
+        // executable, so refusing them here is a no-op in practice.
+        if (destination) {
+            release(*slot, false);
+            return STATUS_INVALID_PAGE_PROTECTION;
+        }
+        memcpy(slot->pending_patch, patch, length);
+        slot->pending_length = static_cast<uint32_t>(length);
+        slot->dormant = true;
+        slot->token = token;
+        slot->spec = spec;
+        slot->active = true;
+        prepared.id = spec.id;
+        prepared.spec = spec;
+        return STATUS_SUCCESS;
+    }
+
+    status =
+        finish_preparation(*slot, spec, patch, length, destination, prepared);
+    if (!NT_SUCCESS(status)) {
+        release(*slot, false);
+        return status;
+    }
+
     // Publish the record before anything can execute the patch: the handler
     // the patch jumps to has nothing but this registry to rely on.
     slot->token = token;
     slot->spec = spec;
     slot->active = true;
-    prepared.id = spec.id;
-    prepared.spec = spec;
     return STATUS_SUCCESS;
 }
 
@@ -616,6 +680,10 @@ NTSTATUS arm_hook(const prepared_hook& prepared) {
     auto* entry = find_locked(prepared.id);
     if (!entry)
         return STATUS_NOT_FOUND;
+    // A dormant hook has nothing to publish yet; it arms itself when its page
+    // turns executable (arm_dormant_hooks).
+    if (entry->dormant)
+        return STATUS_SUCCESS;
     if (!hv::install(prepared.spec)) {
         release(*entry, false);
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -764,12 +832,16 @@ NTSTATUS rebind_hooks_if_copied(uint32_t pid, const void* base, size_t size) {
         if (!pfn || pfn == entry.spec.pfn)
             continue;
         // The page the hook armed is no longer the page the process
-        // executes. Move: same id, same patch, new backing page.
-        hv::remove(entry.spec.id);
+        // executes. Move: same id, same patch, new backing page. A dormant
+        // hook owns no hypervisor state yet, so it just follows the page.
+        if (!entry.dormant)
+            hv::remove(entry.spec.id);
         entry.page.reset();
         entry.page = static_cast<page_lock&&>(fresh);
         entry.spec.pfn = pfn;
         entry.spec.original = entry.page.data();
+        if (entry.dormant)
+            continue;
         const auto rebound = hv::install(entry.spec);
         if (rebound)
             ++rebinds;
@@ -778,6 +850,77 @@ NTSTATUS rebind_hooks_if_copied(uint32_t pid, const void* base, size_t size) {
     }
     KeUnstackDetachProcess(&apc);
     return STATUS_SUCCESS;
+}
+
+// Deferred arming. The NtProtectVirtualMemory maintenance hook calls this
+// after every successful protection change: a dormant hook whose page just
+// became executable is finished (the deferred instruction decode runs on the
+// final bytes) and armed before the syscall returns, so no execution of the
+// page can slip past unhooked. Same event-driven shape as the execute watch:
+// nothing polls, the protection change is the trigger.
+void arm_dormant_hooks(uint32_t pid, const void* base, size_t size) {
+    if (!store || KeGetCurrentIrql() != PASSIVE_LEVEL || !pid || !base || !size)
+        return;
+    if (!hv::ghv.running)
+        return;
+    const auto begin = reinterpret_cast<uint64_t>(base) & ~uint64_t{0xfff};
+    const auto end = begin + size;
+    if (end < begin)
+        return;
+
+    exclusive_lock lock{store->lock};
+    // Candidates: dormant user hooks of this process inside the range. Same
+    // shortcut as rebind_hooks_if_copied: no candidate, no attach.
+    PEPROCESS process{};
+    for (const auto& entry : store->entries) {
+        if (entry.active && entry.dormant && entry.spec.owner_pid == pid &&
+            entry.spec.target >= begin && entry.spec.target < end) {
+            process = entry.process;
+            break;
+        }
+    }
+    if (!process)
+        return;
+
+    KAPC_STATE apc{};
+    KeStackAttachProcess(process, &apc);
+    for (auto& entry : store->entries) {
+        if (!entry.active || !entry.dormant ||
+            entry.spec.domain != hook_domain::user ||
+            entry.spec.owner_pid != pid || entry.spec.target < begin ||
+            entry.spec.target >= end)
+            continue;
+        bool executable = false;
+        if (!NT_SUCCESS(check_user_page(
+                reinterpret_cast<void*>(entry.spec.target), executable)) ||
+            !executable)
+            continue;
+        // The backing page may have moved (copy-on-write) while the hook was
+        // dormant: re-resolve it before the decode reads a stale mapping.
+        auto* const page =
+            reinterpret_cast<void*>(entry.spec.target & ~uint64_t{0xfff});
+        page_lock fresh;
+        if (!NT_SUCCESS(fresh.acquire(page, UserMode, IoReadAccess)))
+            continue;
+        entry.page = static_cast<page_lock&&>(fresh);
+        entry.spec.pfn = entry.page.pfn();
+        entry.spec.original = entry.page.data();
+        prepared_hook prepared{};
+        // A failure leaves the hook dormant: the bytes may simply not be
+        // final yet (or a page mate conflicts), and the next protection
+        // change retries.
+        if (!NT_SUCCESS(
+                finish_preparation(entry, entry.spec, entry.pending_patch,
+                                   entry.pending_length, nullptr, prepared))) {
+            entry.spec.length = 0;
+            continue;
+        }
+        entry.dormant = false;
+        entry.pending_length = 0;
+        if (!hv::install(entry.spec))
+            release(entry, false);
+    }
+    KeUnstackDetachProcess(&apc);
 }
 
 bool begin_hook_window(uint64_t id) {
@@ -815,9 +958,12 @@ void restore_all() {
         return;
     exclusive_lock lock{store->lock};
     // A hook whose page is gone cannot be republished; it stays in the
-    // registry so that a later remove still clears it.
+    // registry so that a later remove still clears it. Dormant hooks were
+    // never armed, so there is nothing to restore: the page was not
+    // executable before the transition and still is not, and the protection
+    // change that eventually makes it executable arms them.
     for (auto& entry : store->entries)
-        if (entry.active)
+        if (entry.active && !entry.dormant)
             (void)hv::install(entry.spec);
 }
 

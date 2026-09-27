@@ -235,6 +235,10 @@ NTSTATUS hook_write_virtual_memory(HANDLE process_handle, PVOID base,
 // call (classic self-decrypting shells: VirtualProtect(RWX) -> decrypt ->
 // jump). When the first instruction of the plain code runs, its virtual page
 // no longer maps the physical page the hook armed.
+//
+// It is also the only gate that makes a committed page executable, so dormant
+// hooks and watches (registered while their page was still read/write) are
+// finished and armed here, before the syscall returns.
 NTSTATUS hook_protect_virtual_memory(HANDLE process_handle, PVOID* base,
                                      PSIZE_T size, ULONG new_protection,
                                      PULONG old_protection) {
@@ -262,6 +266,8 @@ NTSTATUS hook_protect_virtual_memory(HANDLE process_handle, PVOID* base,
         (void)rebind_hooks_if_copied(pid_of(process), aligned_base,
                                      aligned_size);
         watch::rebind_if_copied(process, begin, begin + aligned_size);
+        arm_dormant_hooks(pid_of(process), aligned_base, aligned_size);
+        watch::arm_dormant_if_executable(process, begin, begin + aligned_size);
     }
     ObDereferenceObject(process);
     return status;
