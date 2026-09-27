@@ -1,8 +1,11 @@
 // Real-driver regression for session ownership. Runs only on demand; never
 // injects into an existing process. The child below is an isolated test target.
+#include <gtest/gtest.h>
+
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
+#include <memory>
 #include <stdexcept>
 #include <string>
 
@@ -71,9 +74,11 @@ bool hook_command(HANDLE device, DWORD code, uint64_t id) {
 
 class code_page {
     uint8_t* memory_{};
+    bool process_lifetime_{};
 
    public:
-    code_page() {
+    explicit code_page(bool process_lifetime = false)
+        : process_lifetime_(process_lifetime) {
         memory_ = static_cast<uint8_t*>(VirtualAlloc(
             nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
         require(memory_ != nullptr, "allocate test code");
@@ -89,7 +94,10 @@ class code_page {
         }
     }
     ~code_page() {
-        if (memory_)
+        // The child deliberately leaves its backing mapped until process
+        // teardown: target-exit cleanup must run while hooks still have
+        // backing.
+        if (memory_ && !process_lifetime_)
             VirtualFree(memory_, 0, MEM_RELEASE);
     }
     code_page(const code_page&) = delete;
@@ -101,81 +109,115 @@ class code_page {
     }
 };
 
-void same_process() {
+class SessionSmoke : public ::testing::Test {
+   protected:
+    void SetUp() override {
+        wchar_t enabled[2]{};
+        if (GetEnvironmentVariableW(L"BLOOK_EPT_LIVE", enabled, 2) != 1 ||
+            enabled[0] != L'1') {
+            GTEST_SKIP() << "Real-driver tests require BLOOK_EPT_LIVE=1";
+        }
+    }
+};
+
+class LocalSessionSmoke : public SessionSmoke {
+   protected:
+    // Backing is constructed before handles and destroyed after them, including
+    // fatal assertions and exceptions. Do not move it into individual tests.
+    std::unique_ptr<code_page> page;
+    unique_handle owner;
+    uint64_t id{};
+
+    void SetUp() override {
+        SessionSmoke::SetUp();
+        if (IsSkipped())
+            return;
+        page = std::make_unique<code_page>();
+        owner = open_device(true);
+        ASSERT_EQ(page->call(), 7);
+        id = install(owner.get(), page->address());
+        ASSERT_EQ(page->call(), 42);
+        ASSERT_EQ(hook_count(owner.get()), 1u);
+    }
+
+    void TearDown() override {
+        owner.reset();
+        page.reset();
+    }
+};
+
+TEST_F(LocalSessionSmoke, ObserverClosePreservesOwnerHook) {
     // Raw device handles are intentional: SDK hook destructors send REMOVE
     // before closing, which would hide bugs in IRP_MJ_CLEANUP / IRP_MJ_CLOSE.
-    code_page page;
-    auto owner = open_device(true);
-    require(page.call() == 7, "original result");
-    const auto id = install(owner.get(), page.address());
-    require(page.call() == 42 && hook_count(owner.get()) == 1,
-            "patch is armed");
     {
         // SDK read_only means no ENABLE; the ABI still requires an RW handle.
         auto observer = open_device();
-        require(hook_count(observer.get()) == 1,
-                "read-only observer sees patch");
+        EXPECT_EQ(hook_count(observer.get()), 1u);
     }
-    const auto after = hook_count(owner.get());
-    const auto result = page.call();
-    std::printf("read-only close: hooks 1 -> %u; result 42 -> %d\n", after,
-                result);
-    require(after == 1 && result == 42,
-            "closing a read-only observer revoked another session's hook");
+    EXPECT_EQ(hook_count(owner.get()), 1u);
+    EXPECT_EQ(page->call(), 42);
+}
 
-    // Exactly the epdiag sequence: open a non-enabled RW diagnostic handle,
-    // read stats/probe, then CloseHandle before executing the patched code.
+TEST_F(LocalSessionSmoke, StatsHandleClosePreservesOwnerHook) {
+    // Exactly the epdiag sequence: query on a non-enabled RW handle, close it,
+    // then execute patched code.
     {
         auto observer = open_device();
         ipc::StatsResponse stats{};
-        require(ioctl(observer.get(), ipc::IOCTL_BLOOK_STATS, nullptr, 0,
-                      &stats, sizeof(stats)),
-                "temporary stats query");
+        ASSERT_TRUE(ioctl(observer.get(), ipc::IOCTL_BLOOK_STATS, nullptr, 0,
+                          &stats, sizeof(stats)));
     }
-    require(page.call() == 42, "stats handle close must preserve patch");
+    EXPECT_EQ(page->call(), 42);
+}
+
+TEST_F(LocalSessionSmoke, ProbeHandleClosePreservesOwnerHook) {
     {
         auto observer = open_device();
         ipc::ProbeRequest request{};
         request.header.version = ipc::abi_version;
         request.header.size = sizeof(request);
-        request.address = page.address();
+        request.address = page->address();
         ipc::ProbeResponse response{};
-        require(ioctl(observer.get(), ipc::IOCTL_BLOOK_PROBE, &request,
-                      sizeof(request), &response, sizeof(response)),
-                "temporary address probe");
+        ASSERT_TRUE(ioctl(observer.get(), ipc::IOCTL_BLOOK_PROBE, &request,
+                          sizeof(request), &response, sizeof(response)));
     }
-    require(page.call() == 42, "probe handle close must preserve patch");
+    EXPECT_EQ(page->call(), 42);
+}
+
+TEST_F(LocalSessionSmoke, EmptyEnabledSessionClosePreservesOwnerHook) {
     {
         auto empty_session = open_device(true);
     }
-    require(page.call() == 42,
-            "empty enabled session close must preserve patch");
+    EXPECT_EQ(page->call(), 42);
+}
+
+TEST_F(LocalSessionSmoke, SamePageOwnersAreIsolatedAndCleanedUp) {
     {
         auto second = open_device(true);
-        install(second.get(), page.address(0x80));
-        require(page.call() == 42 && page.call(0x80) == 42 &&
-                    hook_count(owner.get()) == 2,
-                "two sessions share a physical page");
-        require(!hook_command(second.get(), ipc::IOCTL_BLOOK_REMOVE, id) &&
-                    GetLastError() == ERROR_ACCESS_DENIED,
-                "another session cannot remove owner hook");
-        require(!hook_command(second.get(), ipc::IOCTL_BLOOK_REFRESH, id) &&
-                    GetLastError() == ERROR_ACCESS_DENIED,
-                "another session cannot refresh owner hook");
+        install(second.get(), page->address(0x80));
+        ASSERT_EQ(page->call(), 42);
+        ASSERT_EQ(page->call(0x80), 42);
+        ASSERT_EQ(hook_count(owner.get()), 2u);
+        const bool removed =
+            hook_command(second.get(), ipc::IOCTL_BLOOK_REMOVE, id);
+        const DWORD remove_error = GetLastError();
+        EXPECT_FALSE(removed);
+        EXPECT_EQ(remove_error, ERROR_ACCESS_DENIED);
+        const bool refreshed =
+            hook_command(second.get(), ipc::IOCTL_BLOOK_REFRESH, id);
+        const DWORD refresh_error = GetLastError();
+        EXPECT_FALSE(refreshed);
+        EXPECT_EQ(refresh_error, ERROR_ACCESS_DENIED);
     }
-    require(page.call() == 42 && page.call(0x80) == 7 &&
-                hook_count(owner.get()) == 1,
-            "owner close removes only that owner's page mate");
-    require(hook_command(owner.get(), ipc::IOCTL_BLOOK_REFRESH, id),
-            "owner can still refresh");
+    EXPECT_EQ(page->call(), 42);
+    EXPECT_EQ(page->call(0x80), 7);
+    EXPECT_EQ(hook_count(owner.get()), 1u);
+    EXPECT_TRUE(hook_command(owner.get(), ipc::IOCTL_BLOOK_REFRESH, id));
     owner.reset();
-    require(page.call() == 7 && page.call(0x80) == 7,
-            "final owner close restores originals");
+    EXPECT_EQ(page->call(), 7);
+    EXPECT_EQ(page->call(0x80), 7);
     auto observer = open_device();
-    require(hook_count(observer.get()) == 0, "no hooks remain after cleanup");
-    std::puts(
-        "PASS: observer/stats/probe/empty-session close, independent owners, "
-        "same-page cleanup");
+    EXPECT_EQ(hook_count(observer.get()), 0u);
 }
 
 struct child_state {
@@ -203,7 +245,7 @@ int child_main(const wchar_t* name) {
     mapped_state state{static_cast<child_state*>(MapViewOfFile(
         mapping.get(), FILE_MAP_ALL_ACCESS, 0, 0, sizeof(child_state)))};
     require(state.value != nullptr, "child maps channel");
-    code_page page;
+    code_page page{/*process_lifetime=*/true};
     state.value->address = page.address();
     require(SetEvent(response.get()) != FALSE, "child ready");
     while (WaitForSingleObject(request.get(), 15000) == WAIT_OBJECT_0) {
@@ -216,7 +258,7 @@ int child_main(const wchar_t* name) {
                // indefinitely.
 }
 
-void remote_process() {
+TEST_F(SessionSmoke, RemoteOwnerCloseAndTargetExit) {
     const auto base = L"Local\\blook-session-smoke-" +
                       std::to_wstring(GetCurrentProcessId()) + L"-" +
                       std::to_wstring(GetTickCount64());
@@ -271,27 +313,33 @@ void remote_process() {
         install(first.get(), state.value->address, info.dwProcessId);
     const auto second_id =
         install(second.get(), state.value->address + 0x80, info.dwProcessId);
-    require(call(1) == 42 && call(2) == 42, "remote hooks armed");
+    ASSERT_EQ(call(1), 42);
+    ASSERT_EQ(call(2), 42);
     first.reset();
-    require(call(1) == 7 && call(2) == 42,
-            "closing creator removes remote hooks but preserves other owners");
+    EXPECT_EQ(call(1), 7);
+    EXPECT_EQ(call(2), 42);
     // Reinstall so target exit has to clean two independent sessions.
     first = open_device(true);
     const auto new_id =
         install(first.get(), state.value->address, info.dwProcessId);
-    require(new_id != first_id && call(1) == 42, "remote hook reinstalled");
+    EXPECT_NE(new_id, first_id);
+    ASSERT_EQ(call(1), 42);
     state.value->command = 3;
-    require(SetEvent(request.get()) != FALSE, "request target exit");
-    require(WaitForSingleObject(process.get(), 10000) == WAIT_OBJECT_0,
-            "target exited");
-    require(!hook_command(first.get(), ipc::IOCTL_BLOOK_REMOVE, new_id) &&
-                GetLastError() == ERROR_NOT_FOUND,
-            "target exit revoked first session's hook");
-    require(!hook_command(second.get(), ipc::IOCTL_BLOOK_REMOVE, second_id) &&
-                GetLastError() == ERROR_NOT_FOUND,
-            "target exit revoked second session's hook");
-    std::puts(
-        "PASS: remote-owner close, other-owner isolation, target-process exit");
+    ASSERT_NE(SetEvent(request.get()), FALSE);
+    ASSERT_EQ(WaitForSingleObject(process.get(), 10000), WAIT_OBJECT_0);
+    DWORD exit_code{};
+    ASSERT_NE(GetExitCodeProcess(process.get(), &exit_code), FALSE);
+    EXPECT_EQ(exit_code, 0u);
+    const bool removed_first =
+        hook_command(first.get(), ipc::IOCTL_BLOOK_REMOVE, new_id);
+    const DWORD first_error = GetLastError();
+    EXPECT_FALSE(removed_first);
+    EXPECT_EQ(first_error, ERROR_NOT_FOUND);
+    const bool removed_second =
+        hook_command(second.get(), ipc::IOCTL_BLOOK_REMOVE, second_id);
+    const DWORD second_error = GetLastError();
+    EXPECT_FALSE(removed_second);
+    EXPECT_EQ(second_error, ERROR_NOT_FOUND);
 }
 }  // namespace
 
@@ -299,14 +347,22 @@ int wmain(int argc, wchar_t** argv) {
     try {
         if (argc == 3 && std::wcscmp(argv[1], L"--child") == 0)
             return child_main(argv[2]);
-        if (argc == 2 && std::wcscmp(argv[1], L"--remote") == 0) {
-            remote_process();
-        } else {
-            same_process();
-            remote_process();
+        // Preserve the legacy alias while allowing normal GoogleTest flags.
+        // --remote is equivalent to --gtest_filter=SessionSmoke.Remote*.
+        bool remote_only = false;
+        int output = 1;
+        for (int index = 1; index < argc; ++index) {
+            if (std::wcscmp(argv[index], L"--remote") == 0)
+                remote_only = true;
+            else
+                argv[output++] = argv[index];
         }
-        std::puts("PASS: session ownership regression");
-        return 0;
+        argc = output;
+        argv[argc] = nullptr;
+        ::testing::InitGoogleTest(&argc, argv);
+        if (remote_only)
+            GTEST_FLAG_SET(filter, "SessionSmoke.Remote*");
+        return RUN_ALL_TESTS();
     } catch (const std::exception& error) {
         std::fprintf(stderr, "FAIL: %s (Win32=%lu)\n", error.what(),
                      GetLastError());

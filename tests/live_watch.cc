@@ -1,110 +1,82 @@
-// Live end-to-end test of the execute-watch (dump-on-execute) API against the
-// real driver. Self-hosted, exactly like the ept smoke: this process allocates
-// an RWX page with a marker function, arms a watch on its entry, then calls
-// it. The hypervisor dumps the page out of physical memory on the first fetch;
-// the test compares the dump with the bytes in memory.
-//
-// Requires the test-signed driver to be loaded and running. Never part of the
-// host-only test suite.
-#include <cstdio>
-#include <cstring>
+#include <chrono>
 #include <thread>
 
-#include "client/ept.hpp"
+#include "ept_live/fixture.hpp"
 
-int main() {
-    auto session = blook::client::session::open();
-    if (!session) {
-        std::fprintf(stderr,
-                     "open failed: %lu (run elevated, driver running)\n",
-                     session.error());
-        return 1;
+namespace blook::tests::ept_live {
+class LiveWatch : public EptLive {
+   protected:
+    std::optional<client::watch> watch_;
+    std::vector<uint8_t> expected_;
+    void SetUp() override {
+        EptLive::SetUp();
+        if (HasFatalFailure() || IsSkipped())
+            return;
+        ASSERT_TRUE(Allocate());
+        Write(0, return_value(1337));
+        for (size_t i = 0x40; i < page_size; ++i)
+            state_->memory[i] = static_cast<uint8_t>(i * 13);
+        expected_ = Read(0, page_size);
+        ASSERT_TRUE(Publish());
+        ASSERT_EQ(Execute(), 1337);
+        auto armed = state_->session->watch_execute(state_->memory,
+                                                    state_->memory, page_size);
+        ASSERT_TRUE(armed.has_value()) << armed.error().message();
+        watch_.emplace(std::move(*armed));
     }
-
-    auto* memory = static_cast<uint8_t*>(
-        VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
-    if (!memory)
-        return 2;
-    const uint8_t code[] = {0xb8, 0x39, 0x5, 0, 0, 0xc3};  // mov eax,1337; ret
-    std::memcpy(memory, code, sizeof(code));
-    for (size_t i = 0x40; i < 4096; ++i)
-        memory[i] = static_cast<uint8_t>(i * 13);
-    DWORD old{};
-    if (!VirtualProtect(memory, 4096, PAGE_EXECUTE_READWRITE, &old))
-        return 3;
-    FlushInstructionCache(GetCurrentProcess(), memory, 4096);
-    auto* marker = reinterpret_cast<int (*)()>(memory);
-    if (marker() != 1337)
-        return 4;
-
-    // 1) Before the hit, poll says pending and dump() is not ready.
-    auto watch = session->watch_execute(memory, memory, 4096);
-    if (!watch) {
-        std::fprintf(stderr, "arm failed: %lu\n", watch.error());
-        return 5;
+    void TearDown() override {
+        if (watch_ && *watch_) {
+            const auto disarmed = watch_->disarm();
+            if (!disarmed) {
+                MarkCleanupFailed();
+                ADD_FAILURE()
+                    << "DISARM failed: " << disarmed.error().message();
+                (void)new client::watch(std::move(*watch_));
+                (void)state_.release();
+                return;
+            }
+        }
+        EptLive::TearDown();
     }
-    const auto pending = watch->poll();
-    if (!pending || pending->ready) {
-        std::fprintf(stderr, "FAIL: poll before hit reports ready=%d\n",
-                     pending ? int(pending->ready) : -1);
-        return 6;
-    }
-    if (watch->dump()) {
-        std::fprintf(stderr, "FAIL: dump before hit succeeded\n");
-        return 7;
-    }
-
-    // 2) Execute the watched address: the dump is taken from physical memory.
-    if (marker() != 1337)
-        return 8;
-    bool ready = false;
-    blook::client::watch_hit hit{};
-    for (unsigned i = 0; i < 100 && !ready; ++i) {
-        auto polled = watch->poll();
-        if (polled && polled->ready) {
-            ready = true;
-            hit = *polled;
-        } else {
+    void TriggerAndCheckDump() {
+        ASSERT_EQ(Execute(), 1337);
+        bool ready = false;
+        client::watch_hit hit{};
+        for (unsigned i = 0; i < 100; ++i) {
+            auto polled = watch_->poll();
+            ASSERT_TRUE(polled.has_value()) << polled.error().message();
+            if (polled->ready) {
+                hit = *polled;
+                ready = true;
+                break;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
+        ASSERT_TRUE(ready) << "Watch did not fire";
+        EXPECT_EQ(hit.rip, reinterpret_cast<uint64_t>(state_->memory));
+        EXPECT_EQ(hit.total, page_size);
+        const auto dump = watch_->dump();
+        ASSERT_TRUE(dump.has_value()) << dump.error().message();
+        ASSERT_EQ(dump->size(), page_size);
+        EXPECT_EQ(std::memcmp(dump->data(), expected_.data(), page_size), 0);
     }
-    if (!ready) {
-        std::fprintf(stderr, "FAIL: watch never fired\n");
-        return 9;
-    }
-    std::printf("  hit: rip=0x%llx cr3=0x%llx total=%llu\n", hit.rip, hit.cr3,
-                hit.total);
-    if (hit.rip != reinterpret_cast<uint64_t>(memory) || hit.total != 4096)
-        return 10;
-    const auto dump = watch->dump();
-    if (!dump || dump->size() != 4096) {
-        std::fprintf(stderr, "FAIL: dump fetch (size=%llu)\n",
-                     dump ? unsigned long long(dump->size()) : 0ull);
-        return 11;
-    }
-    if (std::memcmp(dump->data(), memory, 4096) != 0) {
-        std::fprintf(stderr, "FAIL: dump bytes diverge from memory\n");
-        return 12;
-    }
-    std::printf("  dump matches the page byte for byte (%zu bytes)\n",
-                dump->size());
-
-    // 3) The code keeps running unarmed after the one-shot hit.
-    for (unsigned i = 0; i < 10000; ++i)
-        if (marker() != 1337) {
-            std::fprintf(stderr, "FAIL: marker() changed after hit at i=%u\n",
-                         i);
-            return 13;
-        }
-    std::printf("  loop intact, disarming...\n");
-    const auto disarmed = watch->disarm();
-    std::printf("  disarm result=%d\n", disarmed ? 1 : 0);
-    VirtualFree(memory, 0, MEM_RELEASE);
-    if (!disarmed) {
-        std::fprintf(stderr, "FAIL: disarm error=%lu\n",
-                     disarmed.error().value());
-        return 14;
-    }
-    std::printf("PASS: execute watch dumped from physical memory on hit\n");
-    return 0;
+};
+TEST_F(LiveWatch, PendingWatchRejectsDumpBeforeExecution) {
+    const auto pending = watch_->poll();
+    ASSERT_TRUE(pending.has_value()) << pending.error().message();
+    EXPECT_FALSE(pending->ready);
+    const auto dump = watch_->dump();
+    EXPECT_FALSE(dump.has_value());
 }
+TEST_F(LiveWatch, OwnerExecutionDumpsExactPhysicalBytes) {
+    ASSERT_NO_FATAL_FAILURE(TriggerAndCheckDump());
+}
+TEST_F(LiveWatch, OneShotHitKeepsCodeRunningAndDisarmsCleanly) {
+    ASSERT_NO_FATAL_FAILURE(TriggerAndCheckDump());
+    for (unsigned i = 0; i < 10000; ++i)
+        ASSERT_EQ(Execute(), 1337) << i;
+    const auto disarmed = watch_->disarm();
+    ASSERT_TRUE(disarmed.has_value()) << disarmed.error().message();
+    EXPECT_EQ(Execute(), 1337);
+}
+}  // namespace blook::tests::ept_live

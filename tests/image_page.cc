@@ -1,129 +1,247 @@
-// Minimal repro of the crash seen in the game: two EPT entry hooks on the SAME
-// 4 KiB *image* page (bcrypt.dll: BCryptSetProperty @0x4ad0 and
-// BCryptGenerateSymmetricKey @0x4d50 both live in page 0x4xxx), then exercise
-// both functions and check that they still behave exactly as before.
+// Regression: two entry hooks sharing one bcrypt.dll image page. The driver
+// path is deliberately opt-in; the ordinary CBC baseline never opens a session.
 #include <windows.h>
 #include <bcrypt.h>
-#include <cstdio>
-#include <cstring>
-#include <memory>
+#include <gtest/gtest.h>
+
+#include <array>
+#include <atomic>
 #include <cstdint>
+#include <cstring>
+#include <cwchar>
+#include <optional>
+#include <type_traits>
 #include <vector>
 
 #include "client/ept.hpp"
 
-static int g_bad = 0;
-static long g_hits_prop = 0, g_hits_gen = 0;
+namespace {
 
-typedef long(__cdecl *fn4)(void *, void *, uint64_t, uint64_t);
+using SetProperty = decltype(&BCryptSetProperty);
+using GenerateKey = decltype(&BCryptGenerateSymmetricKey);
+SetProperty original_property = nullptr;
+GenerateKey original_generate = nullptr;
+std::atomic<unsigned long> property_hits{0}, generate_hits{0};
 
-static void *alloc_near(void *t) {
-    uintptr_t a = (uintptr_t)t;
-    for (uintptr_t d = 0x10000; d < 0x10000000ull; d += 0x10000) {
-        if (a <= d) break;
-        void *p = VirtualAlloc((void *)((a - d) & ~(uintptr_t)0xFFFF), 0x1000,
-                               MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-        if (p) return p;
+NTSTATUS WINAPI property_handler(BCRYPT_HANDLE object, LPCWSTR property,
+                                 PUCHAR input, ULONG input_size, ULONG flags) {
+    property_hits.fetch_add(1, std::memory_order_relaxed);
+    return original_property(object, property, input, input_size, flags);
+}
+
+NTSTATUS WINAPI generate_handler(BCRYPT_ALG_HANDLE algorithm,
+                                 BCRYPT_KEY_HANDLE* key, PUCHAR key_object,
+                                 ULONG key_object_size, PUCHAR secret,
+                                 ULONG secret_size, ULONG flags) {
+    generate_hits.fetch_add(1, std::memory_order_relaxed);
+    return original_generate(algorithm, key, key_object, key_object_size,
+                             secret, secret_size, flags);
+}
+static_assert(std::is_same_v<decltype(&property_handler), SetProperty>);
+static_assert(std::is_same_v<decltype(&generate_handler), GenerateKey>);
+
+struct Algorithm {
+    BCRYPT_ALG_HANDLE value = nullptr;
+    ~Algorithm() { if (value) BCryptCloseAlgorithmProvider(value, 0); }
+};
+struct Key {
+    BCRYPT_KEY_HANDLE value = nullptr;
+    ~Key() { if (value) BCryptDestroyKey(value); }
+};
+
+::testing::AssertionResult cbc_roundtrip() {
+    Algorithm algorithm;
+    auto status = BCryptOpenAlgorithmProvider(&algorithm.value,
+                                              BCRYPT_AES_ALGORITHM, nullptr, 0);
+    if (status < 0)
+        return ::testing::AssertionFailure() << "BCryptOpenAlgorithmProvider: " << status;
+    status = BCryptSetProperty(
+        algorithm.value, BCRYPT_CHAINING_MODE,
+        reinterpret_cast<PUCHAR>(const_cast<wchar_t*>(BCRYPT_CHAIN_MODE_CBC)),
+        static_cast<ULONG>((std::wcslen(BCRYPT_CHAIN_MODE_CBC) + 1) * sizeof(wchar_t)), 0);
+    if (status < 0)
+        return ::testing::AssertionFailure() << "BCryptSetProperty: " << status;
+
+    ULONG object_size = 0, returned = 0;
+    status = BCryptGetProperty(algorithm.value, BCRYPT_OBJECT_LENGTH,
+                              reinterpret_cast<PUCHAR>(&object_size),
+                              sizeof(object_size), &returned, 0);
+    if (status < 0 || returned != sizeof(object_size) || object_size == 0)
+        return ::testing::AssertionFailure() << "BCRYPT_OBJECT_LENGTH: " << status;
+    // The key object must outlive the key handle, including early returns.
+    std::vector<UCHAR> object(object_size);
+    Key key;
+    std::array<UCHAR, 16> secret{}, initial_iv{};
+    std::array<UCHAR, 32> plaintext{}, ciphertext{}, recovered{};
+    for (size_t i = 0; i < secret.size(); ++i) {
+        secret[i] = static_cast<UCHAR>(0xa0 + i);
+        initial_iv[i] = static_cast<UCHAR>(0x10 + i);
+    }
+    for (size_t i = 0; i < plaintext.size(); ++i)
+        plaintext[i] = static_cast<UCHAR>(i * 3 + 1);
+    status = BCryptGenerateSymmetricKey(algorithm.value, &key.value,
+                                        object.data(), object_size, secret.data(),
+                                        static_cast<ULONG>(secret.size()), 0);
+    if (status < 0)
+        return ::testing::AssertionFailure() << "BCryptGenerateSymmetricKey: " << status;
+
+    // BCryptEncrypt mutates its IV. Decryption needs the same INITIAL IV,
+    // not the IV left behind by encryption.
+    auto encrypt_iv = initial_iv;
+    auto decrypt_iv = initial_iv;
+    ULONG encrypted_size = 0, decrypted_size = 0;
+    status = BCryptEncrypt(key.value, plaintext.data(), static_cast<ULONG>(plaintext.size()),
+                           nullptr, encrypt_iv.data(), static_cast<ULONG>(encrypt_iv.size()),
+                           ciphertext.data(), static_cast<ULONG>(ciphertext.size()), &encrypted_size, 0);
+    if (status < 0 || encrypted_size != plaintext.size())
+        return ::testing::AssertionFailure() << "BCryptEncrypt: " << status
+                                             << ", length=" << encrypted_size;
+    status = BCryptDecrypt(key.value, ciphertext.data(), encrypted_size,
+                           nullptr, decrypt_iv.data(), static_cast<ULONG>(decrypt_iv.size()),
+                           recovered.data(), static_cast<ULONG>(recovered.size()), &decrypted_size, 0);
+    if (status < 0 || decrypted_size != plaintext.size() || recovered != plaintext)
+        return ::testing::AssertionFailure() << "BCryptDecrypt/roundtrip: " << status
+                                             << ", length=" << decrypted_size;
+    return ::testing::AssertionSuccess();
+}
+
+void* allocate_near(const void* entry) {
+    const auto address = reinterpret_cast<uintptr_t>(entry);
+    for (uintptr_t distance = 0x10000; distance < 0x10000000; distance += 0x10000) {
+        if (address <= distance) break;
+        auto* candidate = reinterpret_cast<void*>((address - distance) & ~uintptr_t{0xffff});
+        if (auto* page = VirtualAlloc(candidate, 0x1000, MEM_RESERVE | MEM_COMMIT,
+                                      PAGE_EXECUTE_READWRITE))
+            return page;
     }
     return nullptr;
 }
-static uint8_t *build_stub(uint8_t *entry, size_t covered) {
-    uint8_t *page = (uint8_t *)alloc_near(entry);
-    if (!page) return nullptr;
-    memcpy(page, entry, covered);
-    for (size_t i = 0; i + 5 <= covered;) {
-        if (page[i] != 0xE8 && page[i] != 0xE9) { ++i; continue; }
-        int32_t rel; memcpy(&rel, page + i + 1, 4);
-        const uint8_t *tgt = entry + i + 5 + rel;
-        int64_t n = (int64_t)(tgt - (page + i + 5));
-        if (n < 0x7ffffff0ll && n > -0x7ffffff0ll) { int32_t v = (int32_t)n; memcpy(page + i + 1, &v, 4); }
-        i += 5;
+
+// These complete x64 instruction sequences contain ONLY register/stack moves:
+// property: mov [rsp+8],rbx; mov [rsp+10h],rbp
+// generate: mov r11,rsp; mov [r11+8],rbx
+// They have no PC-relative operands and can be copied verbatim. This is NOT an
+// instruction decoder or a general relocation scheme. Any other build skips.
+constexpr std::array<UCHAR, 10> property_prologue{
+    0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x6c, 0x24, 0x10};
+constexpr std::array<UCHAR, 7> generate_prologue{
+    0x4c, 0x8b, 0xdc, 0x49, 0x89, 0x5b, 0x08};
+
+template<class Function>
+struct EntryHook {
+    Function& original;
+    void* trampoline = nullptr;
+    void* literal = nullptr;
+    std::optional<blook::client::hook> installed;
+
+    explicit EntryHook(Function& function) : original(function) {}
+    EntryHook(const EntryHook&) = delete;
+    EntryHook& operator=(const EntryHook&) = delete;
+    ~EntryHook() {
+        if (installed) {
+            const auto removed = installed->remove();
+            if (!removed) {
+                // Never free code/literals that a still-installed hook can use.
+                // Report failure and retain mappings until process exit.
+                ADD_FAILURE() << "Hook removal failed; retaining executable storage: "
+                              << removed.error().message();
+                return;
+            }
+        }
+        original = nullptr;
+        if (literal) VirtualFree(literal, 0, MEM_RELEASE);
+        if (trampoline) VirtualFree(trampoline, 0, MEM_RELEASE);
     }
-    uint8_t *j = page + covered;
-    uint64_t *lit = (uint64_t *)(j + 6);
-    *lit = (uint64_t)(entry + covered);
-    int64_t rel = (int64_t)((uint8_t *)lit - (j + 6));
-    j[0] = 0xFF; j[1] = 0x25; memcpy(j + 2, &rel, 4);
-    FlushInstructionCache(GetCurrentProcess(), page, covered + 14);
-    return page;
-}
-static fn4 g_orig_prop = nullptr, g_orig_gen = nullptr;
-static std::vector<std::unique_ptr<blook::client::hook>> g_keep;
 
-extern "C" __declspec(dllexport) uint64_t __cdecl hProp(void *a, void *b, uint64_t c, uint64_t d) {
-    ++g_hits_prop;
-    return g_orig_prop(a, b, c, d);
-}
-extern "C" __declspec(dllexport) uint64_t __cdecl hGen(void *a, void *b, uint64_t c, uint64_t d) {
-    ++g_hits_gen;
-    return g_orig_gen(a, b, c, d);
-}
+    template<size_t N>
+    ::testing::AssertionResult arm(blook::client::session& session, void* entry,
+                                  Function handler, const std::array<UCHAR, N>& expected) {
+        static_assert(N >= blook::jump_patch_length);
+        if (std::memcmp(entry, expected.data(), N) != 0)
+            return ::testing::AssertionFailure() << "Prologue changed after preflight";
+        trampoline = allocate_near(entry);
+        if (!trampoline)
+            return ::testing::AssertionFailure() << "Trampoline allocation failed: " << GetLastError();
+        auto* code = static_cast<UCHAR*>(trampoline);
+        std::memcpy(code, entry, N);
+        // jmp qword ptr [rip+0]; absolute continuation in an unhooked allocation.
+        constexpr UCHAR jump[]{0xff, 0x25, 0, 0, 0, 0};
+        std::memcpy(code + N, jump, sizeof(jump));
+        const auto continuation = reinterpret_cast<uintptr_t>(entry) + N;
+        std::memcpy(code + N + sizeof(jump), &continuation, sizeof(continuation));
+        if (!FlushInstructionCache(GetCurrentProcess(), code, N + 14))
+            return ::testing::AssertionFailure() << "FlushInstructionCache failed: " << GetLastError();
+        literal = allocate_near(entry);
+        if (!literal)
+            return ::testing::AssertionFailure() << "Literal allocation failed: " << GetLastError();
+        const auto destination = reinterpret_cast<uintptr_t>(handler);
+        std::memcpy(literal, &destination, sizeof(destination));
+        const auto patch = blook::client::entry_jump(entry, literal);
+        if (!patch)
+            return ::testing::AssertionFailure() << "Entry literal is out of rel32 range";
+        original = reinterpret_cast<Function>(trampoline);
+        auto result = session.patch(entry, *patch);
+        if (!result)
+            return ::testing::AssertionFailure() << "session.patch: " << result.error().message();
+        installed.emplace(std::move(*result));
+        return ::testing::AssertionSuccess();
+    }
+};
 
-static bool arm(blook::client::session &sess, void *entry, void *handler, const uint8_t *expect, size_t covered, fn4 *orig) {
-    if (memcmp(entry, expect, covered) != 0) { printf("  prologue mismatch at %p\n", entry); return false; }
-    uint8_t *stub = build_stub((uint8_t *)entry, covered);
-    if (!stub) { printf("  stub build failed\n"); return false; }
-    *orig = (fn4)stub;
-    void *literal = alloc_near(entry);
-    *(uint64_t *)literal = (uint64_t)handler;
-    auto bytes = blook::client::entry_jump(entry, literal);
-    if (!bytes) { printf("  entry_jump failed\n"); return false; }
-    auto h = sess.patch(entry, *bytes);
-    if (!h) { printf("  patch FAILED %lu\n", h.error().value()); return false; }
-    g_keep.push_back(std::make_unique<blook::client::hook>(std::move(*h)));
-    return true;
-}
-
-static int cbc_roundtrip(const char *tag) {
-    BCRYPT_ALG_HANDLE alg = nullptr;
-    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_AES_ALGORITHM, nullptr, 0) < 0) { printf("  [%s] open alg failed\n", tag); return 1; }
-    BCryptSetProperty(alg, BCRYPT_CHAINING_MODE, (PUCHAR)BCRYPT_CHAIN_MODE_CBC,
-                      (ULONG)((wcslen(BCRYPT_CHAIN_MODE_CBC) + 1) * sizeof(wchar_t)), 0);
-    unsigned char obj[512]; BCRYPT_KEY_HANDLE key = nullptr;
-    unsigned char secret[16]; for (int i = 0; i < 16; ++i) secret[i] = (unsigned char)(0xA0 + i);
-    if (BCryptGenerateSymmetricKey(alg, &key, obj, sizeof obj, secret, sizeof secret, 0) < 0) { printf("  [%s] genkey failed\n", tag); return 1; }
-    unsigned char iv[16], pt[32]{}, ct[64]{}, back[64]{};
-    for (int i = 0; i < 16; ++i) iv[i] = (unsigned char)(0x10 + i);
-    for (int i = 0; i < 32; ++i) pt[i] = (unsigned char)(i * 3 + 1);
-    ULONG g1 = 0, g2 = 0;
-    long e = BCryptEncrypt(key, pt, sizeof pt, nullptr, iv, sizeof iv, ct, sizeof ct, &g1, 0);
-    long d = BCryptDecrypt(key, ct, g1, nullptr, iv, sizeof iv, back, sizeof back, &g2, 0);
-    const bool ok = e >= 0 && d >= 0 && g2 == sizeof pt && memcmp(back, pt, sizeof pt) == 0;
-    printf("  [%s] enc=0x%lx dec=0x%lx outLen=%lu %s\n", tag, (unsigned long)e, (unsigned long)d, g2, ok ? "MATCH" : "*** MISMATCH ***");
-    BCryptDestroyKey(key); BCryptCloseAlgorithmProvider(alg, 0);
-    return ok ? 0 : 1;
+TEST(ImagePage, HostBcryptCbcRoundtrip) {
+    ASSERT_TRUE(cbc_roundtrip());
 }
 
-int main() {
+TEST(ImagePage, LiveTwoBcryptHooksOnSameImagePage) {
+    char live[2]{};
+    if (GetEnvironmentVariableA("BLOOK_EPT_LIVE", live, sizeof(live)) != 1 || live[0] != '1')
+        GTEST_SKIP() << "Set BLOOK_EPT_LIVE=1 to execute the live EPT regression";
+    if constexpr (sizeof(void*) != 8)
+        GTEST_SKIP() << "This regression requires x64 prologues";
+
+    // bcrypt is a linked dependency: GetModuleHandle does not acquire a loader
+    // reference and therefore does not require FreeLibrary.
+    const auto module = GetModuleHandleW(L"bcrypt.dll");
+    ASSERT_NE(module, nullptr);
+    auto* property = reinterpret_cast<void*>(GetProcAddress(module, "BCryptSetProperty"));
+    auto* generate = reinterpret_cast<void*>(GetProcAddress(module, "BCryptGenerateSymmetricKey"));
+    ASSERT_NE(property, nullptr);
+    ASSERT_NE(generate, nullptr);
+    if ((reinterpret_cast<uintptr_t>(property) >> 12) !=
+        (reinterpret_cast<uintptr_t>(generate) >> 12))
+        GTEST_SKIP() << "This bcrypt build does not place both exports on one 4 KiB page";
+    if (std::memcmp(property, property_prologue.data(), property_prologue.size()) != 0 ||
+        std::memcmp(generate, generate_prologue.data(), generate_prologue.size()) != 0)
+        GTEST_SKIP() << "Unsupported bcrypt prologue; no relocation is attempted";
+
+    ASSERT_TRUE(cbc_roundtrip());
     auto opened = blook::client::session::open();
-    if (!opened) { printf("session::open failed %lu\n", opened.error().value()); return 1; }
-    auto &sess = *opened;
-
-    HMODULE bcrypt = LoadLibraryW(L"bcrypt.dll");
-    if (!bcrypt) { printf("bcrypt.dll load failed\n"); return 1; }
-    void *pProp = (void *)GetProcAddress(bcrypt, "BCryptSetProperty");
-    void *pGen = (void *)GetProcAddress(bcrypt, "BCryptGenerateSymmetricKey");
-    printf("BCryptSetProperty=%p BCryptGenerateSymmetricKey=%p same_page=%s\n", pProp, pGen,
-           ((uintptr_t)pProp >> 12) == ((uintptr_t)pGen >> 12) ? "YES" : "NO");
-    if (((uintptr_t)pProp >> 12) != ((uintptr_t)pGen >> 12)) { printf("probe invalid: not on one page\n"); return 2; }
-
-    printf("-- baseline round trip\n");
-    if (cbc_roundtrip("baseline")) g_bad++;
-
-    static const uint8_t kProp[10] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x6c, 0x24, 0x10};
-    static const uint8_t kGen[7] = {0x4c, 0x8b, 0xdc, 0x49, 0x89, 0x5b, 0x08};
-    printf("-- arming two hooks in the SAME image page\n");
-    if (!arm(sess, pProp, (void *)&hProp, kProp, sizeof kProp, &g_orig_prop)) g_bad++;
-    if (!arm(sess, pGen, (void *)&hGen, kGen, sizeof kGen, &g_orig_gen)) g_bad++;
-
-    printf("-- round trip with both hooks installed\n");
-    if (cbc_roundtrip("hooked")) g_bad++;
-    for (int i = 0; i < 20; ++i) if (cbc_roundtrip("loop")) g_bad++;
-    printf("  hits: SetProperty=%ld GenerateSymmetricKey=%ld (want >0 both)\n", g_hits_prop, g_hits_gen);
-    if (!g_hits_prop || !g_hits_gen) g_bad++;
-
-    auto q = sess.query();
-    printf("query running=%u hooks=%u\n", q ? q->running : 0, q ? q->hooks : 0);
-    printf("RESULT bad=%d\n", g_bad);
-    return g_bad;
+    ASSERT_TRUE(opened) << opened.error().message();
+    auto& session = *opened;
+    property_hits.store(0, std::memory_order_relaxed);
+    generate_hits.store(0, std::memory_order_relaxed);
+    {
+        EntryHook<SetProperty> property_hook(original_property);
+        EntryHook<GenerateKey> generate_hook(original_generate);
+        ASSERT_TRUE(property_hook.arm(session, property, &property_handler, property_prologue));
+        ASSERT_TRUE(generate_hook.arm(session, generate, &generate_handler, generate_prologue));
+        for (int iteration = 0; iteration < 21; ++iteration) {
+            SCOPED_TRACE(iteration);
+            ASSERT_TRUE(cbc_roundtrip());
+        }
+        EXPECT_GT(property_hits.load(std::memory_order_relaxed), 0ul);
+        EXPECT_GT(generate_hits.load(std::memory_order_relaxed), 0ul);
+        const auto query = session.query();
+        ASSERT_TRUE(query) << query.error().message();
+        EXPECT_TRUE(query->running);
+    }
+    // Exercise the original image again after the hooks and trampoline mappings
+    // have been removed; neither handler should be entered anymore.
+    const auto properties_before = property_hits.load(std::memory_order_relaxed);
+    const auto generations_before = generate_hits.load(std::memory_order_relaxed);
+    ASSERT_TRUE(cbc_roundtrip());
+    EXPECT_EQ(property_hits.load(std::memory_order_relaxed), properties_before);
+    EXPECT_EQ(generate_hits.load(std::memory_order_relaxed), generations_before);
 }
+
+}  // namespace

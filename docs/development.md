@@ -177,9 +177,75 @@ xmake build -a
 
 ### 4. EPT 引擎模型测试（blook-tests）
 
-- 测试入口为 [unit.cc](<../tests/unit.cc>) 与 [ept_model.cc](<../tests/ept_model.cc>)。
-- 引入经过模拟桩替换的物理内存分配器与 VMX 特权指令（如 `invept`），直接运行内核 [ept.cpp](<../src/driver/hv/ept.cpp>) 的真实代码。
-- 验证 EPT 4 级页表的构建、页面分割（2 MiB 页拆分为 4 KiB 页）、影子页映射写入、执行权限与读写权限分离以及 hook 撤销时的页表结构复原。
+已迁移到 GoogleTest 1.17.0（xmake 管理依赖），不再用自定义 `require` / 进程退出作为 EPT 测试框架。策略测试位于 [unit.cc](<../tests/unit.cc>)，EPT 用例按主题拆分在 [ept](<../tests/ept>) 和 [ept_edges](<../tests/ept_edges>)。
+
+- [fixture.hpp](<../tests/ept/fixture.hpp>)：每例独立分配 EPT、原始页，重置 CR3、物理映射、MTRR、MTF、统计与诊断；支持 shuffle/repeat，不依赖前一用例残留状态。
+- [hooks.cc](<../tests/ept/hooks.cc>)、[watch.cc](<../tests/ept/watch.cc>)、[memory_types.cc](<../tests/ept/memory_types.cc>)：保留原安装/撤销、进程隔离、同页多 hook、watch 互斥/跨页 dump、MTRR 等覆盖。
+- [jit_write.cc](<../tests/ept_edges/jit_write.cc>)：hook 后写入页首/页尾/patch 内外，整页 oracle 比较，固定随机种子的多轮重写、多 vCPU 显式发布。
+- [boundaries.cc](<../tests/ept_edges/boundaries.cc>)、[resources.cc](<../tests/ept_edges/resources.cc>)、[windows.cc](<../tests/ept_edges/windows.cc>)：patch 长度/跨页、内部入口逐字节测试、容量耗尽、拆页池耗尽及回收、未知 ID、嵌套及同页 call-original 窗口。
+- [regression.cc](<../tests/ept/regression.cc>)：遵循真实 VM-exit dispatcher 在非 EPT exit 前 rearm 的约束，验证撤销后的 split 复用；不把违反上层调用约束的序列当成生产 bug。
+
+这些模型测试通过 `BLOOK_EPT_TEST` 编译真实的 [ept.cpp](<../src/driver/hv/ept.cpp>)，并用 platform mock 替换平台操作；这**不是在用户态运行驱动**，不会加载 `.sys`、执行真实 VMX 或访问真实 EPT 硬件，也不会执行测试代码页中的机器码或真实 INVEPT/MTF。因此不能证明硬件缓存、跨核同步、指令跨页重启或任意并发自修改代码完全透明。下述 live 测试则由用户态 GoogleTest 通过 SDK IOCTL 调用**已加载的内核驱动**，两者的执行路径与验证边界不同。
+
+```powershell
+xmake build blook-tests
+xmake run blook-tests
+xmake run blook-tests --gtest_shuffle --gtest_random_seed=455 --gtest_repeat=20
+xmake run blook-tests --gtest_filter=*Jit*:*Write* --gtest_output=xml:build/ept-jit-results.xml
+```
+
+### GoogleTest 真实 JIT / 写后执行测试
+
+非默认目标 `blook-ept-live-tests` 通过用户态 SDK 的 IOCTL 接口访问已加载驱动，不是在用户态运行驱动实现。默认运行全部跳过，且在检查 opt-in 前不会打开驱动。只有在已加载匹配驱动的隔离 Intel x64 测试机上显式设置 `BLOOK_EPT_LIVE=1` 才进行实际安装/执行；opt-in 后环境不可用算失败，不伪装成通过。不会自动安装或启动驱动服务。
+
+```powershell
+xmake build blook-ept-live-tests
+# 安全检查：不访问驱动，预期 SKIPPED
+$env:BLOOK_EPT_LIVE = '0'
+xmake run blook-ept-live-tests
+# 仅在隔离、可恢复的硬件测试机上：
+$env:BLOOK_EPT_LIVE = '1'
+xmake run blook-ept-live-tests --gtest_output=xml:build/ept-live-results.xml
+Remove-Item Env:BLOOK_EPT_LIVE
+```
+
+真实测试使用自行分配的代码页，覆盖 RW→RX JIT 发布、执行 patch/数据读原字节、同页代码重写、显式 refresh、撤销后保留最新写入以及跨页拒绝。**写入与 refresh 期间必须停止执行该代码页**；宿主模型中自动 resync 使用的 backing 指针，不等同于真实驱动用户代码快照会自动同步。模型层 CoW / remap 的 PFN 变化须重新绑定；真实驱动保护维护路径的自动 rebind 由 [live_cow.cc](<../tests/live_cow.cc>) 的独立 GoogleTest 验证。任意跨核无同步自修改、GC 搬迁、异常重启、别名映射并不因此获得完整保证。
+
+### 其余旧测试统一迁移 GoogleTest
+
+原有自定义 `check/finish` 框架已移除。以下目标现在均支持 `--gtest_list_tests`、`--gtest_filter`、`--gtest_shuffle` 和 XML 报告：
+
+| 目标 | 独立用例 | 类型 |
+| --- | ---: | --- |
+| `blook-client-tests` | 20 | SDK mock；每例重置假 IOCTL 状态 |
+| `blook-loader-tests` | 20 | CLI / INI 解析 |
+| `blook-protocol-tests` | 10 | 保留编译期 ABI 断言并拆分运行期契约 |
+| `blook-terminal-fixture` | 3 | 捕获 stdout/stderr，验证正常、降级及 Unicode 错误输出 |
+| `blook-ept-smoke` | 2 | 实际并发执行与写后 refresh/撤销 |
+| `blook-live-watch` | 3 | pending、精确 dump、one-shot 执行与清理 |
+| `blook-live-cow` | 1 | 真实 image 页保护变化后的 hook rebind |
+| `blook-session-smoke` | 6 | 句柄生命周期、所有权隔离、远程目标退出 |
+| `blook-image-page-tests` | 2 | 无驱动 BCrypt baseline + opt-in 同页双 hook |
+
+后五个目标中的真实驱动用例都要求 `BLOOK_EPT_LIVE=1`；默认跳过，不参与普通宿主 `xmake test`。直接使用 `xmake run <target>` 加 GoogleTest flags 运行，不使用隔离 runner，也不为每个用例另启子进程。可通过 `--gtest_list_tests` 查看用例、`--gtest_filter` 选择用例、`--gtest_output=xml:...` 保存报告；需要核对产物时使用 `xmake show -t <target>` 查看当前配置的 targetfile。按 GoogleTest 输出及 XML 区分 PASS、FAIL 与 SKIPPED，不将平台布局不匹配的跳过误报为通过。
+
+```powershell
+xmake build blook-live-watch
+$env:BLOOK_EPT_LIVE = '1'
+xmake run blook-live-watch --gtest_list_tests
+xmake run blook-live-watch --gtest_filter=* --gtest_output=xml:build/ept-live-watch-results.xml
+Remove-Item Env:BLOOK_EPT_LIVE
+```
+
+GoogleTest flags 本身不提供挂起超时保护。若实际测试挂起，停止该次运行并检查驱动及机器状态；终止用户态测试进程不代表内核状态已恢复，不应据此连续重跑。
+
+[image_page.cc](<../tests/image_page.cc>) 还修复了原复现程序的 BCrypt handler 参数数量及 CBC IV 重用错误；只有系统函数同页且已知 prologue 精确匹配时才安装 hook。保留 [bench.cc](<../tests/bench.cc>) 为独立性能测量工具，不把计时输出冒充 GoogleTest 正确性断言，现有 Bench 脚本接口不变。
+
+历史实测记录：宿主新增迁移 53 项随机顺序重复 3 轮通过；真实新套件 16 项中 15 项通过、1 项同页自读取挂起，已实际复现，并非 SKIPPED；此前确认挂起的测试进程已终止，但这不证明挂起原因已修复或内核状态已恢复。此前采用隔离执行方式时，上表后五个目标合计 14 项曾在本机实际执行通过（含 BCrypt baseline，真实驱动项未跳过）；该历史结果不代表本轮直接执行结果。
+
+最新使用 `xmake run <target>` 直接执行的记录：宿主 5 个目标通过；`blook-ept-smoke` 2 项、`blook-live-watch` 3 项、`blook-live-cow` 1 项、`blook-session-smoke` 6 项通过；`blook-image-page-tests` 的 BCrypt baseline 1 项通过，live image 用例因 `Unsupported bcrypt prologue` **SKIPPED**，不是通过，也未绕过 prologue 检查。`blook-ept-live-tests` 使用过滤器排除已知挂起用例后，其余 15 项通过；被排除的挂起用例未在本轮验证，不能计为通过或 GoogleTest SKIPPED。此前 image live 通过、本轮跳过的差异须保留，不能写成本轮全部 14 项通过。
+
+这些通过记录不能抵消同页自读取的挂起证据；问题仍待分析和验证，本指南不依赖隔离执行脚本，也不将更换运行方式视为修复。
 
 ### 实际驱动会话生命周期回归
 
@@ -187,9 +253,11 @@ xmake build -a
 
 ```powershell
 xmake build blook-session-smoke
+$env:BLOOK_EPT_LIVE = '1'
 xmake run blook-session-smoke
-# 仅验证跨进程所有权 / 目标退出清理
-xmake run blook-session-smoke --remote
+# 仅验证跨进程所有权 / 目标退出清理（--remote 别名也保留）
+xmake run blook-session-smoke --gtest_filter=SessionSmoke.Remote*
+Remove-Item Env:BLOOK_EPT_LIVE
 ```
 
 覆盖临时只读查询、统计、地址探测及空的已使能会话关闭后原 hook 仍生效；不同会话同页 hook 的独立清理与令牌鉴权；关闭创建会话后远程目标恢复原值；目标进程退出后跨会话 hook 全部失效。

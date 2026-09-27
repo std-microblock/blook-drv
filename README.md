@@ -115,4 +115,5 @@ target =
 | [hook.hpp](<src/policy/hook.hpp>) / [x86_length.hpp](<src/policy/x86_length.hpp>) | 无系统依赖的策略逻辑，包括页边界计算与 x86_64 指令长度解码 |
 | [ept.hpp](<src/client/ept.hpp>) | 用户态 C++23 API，提供 `session` 与 `hook` 抽象封装 |
 | [main.cc](<src/loader/main.cc>) | 命令行管理程序，提供服务控制、配置解析与诊断操作 |
-| [unit.cc](<tests/unit.cc>) / [ept_model.cc](<tests/ept_model.cc>) | 宿主机模型测试，验证纯策略逻辑、协议结构与 EPT 映射机制 |
+| [unit.cc](<tests/unit.cc>) / [ept](<tests/ept>) / [ept_edges](<tests/ept_edges>) | GoogleTest 宿主机测试，验证策略、EPT 映射、JIT 写后同步与边界状态 |
+| [ept_live](<tests/ept_live>) | 显式 opt-in 的 GoogleTest 真实 JIT、透明读写与撤销回归，默认安全跳过 |

@@ -1,12 +1,12 @@
 #include "ipc/protocol.hpp"
 
+#include <gtest/gtest.h>
+
 #include <array>
 #include <concepts>
 #include <cstddef>
 #include <initializer_list>
 #include <type_traits>
-
-#include "support.hpp"
 
 namespace {
 template <class... Ts>
@@ -137,84 +137,105 @@ static_assert(ioctl_contract());
 template <ipc::WireRequest T>
 void test_request() {
     auto value = ipc::request<T>();
-    test::check(value.header.version == 5, "factory initializes ABI v5");
-    test::check(value.header.size == sizeof(T),
-                "factory initializes exact wire size");
-    test::check(ipc::valid_header(value), "factory produces a valid header");
+    ASSERT_TRUE((value.header.version == 5)) << "factory initializes ABI v5";
+    ASSERT_TRUE((value.header.size == sizeof(T)))
+        << "factory initializes exact wire size";
+    ASSERT_TRUE((ipc::valid_header(value)))
+        << "factory produces a valid header";
     // Inspect named fields only: padding bytes are not part of this contract.
-    test::check(initialized_fields(value),
-                "factory initializes all payload fields");
-    test::check(!ipc::valid_header(T{}), "default request lacks wire size");
+    ASSERT_TRUE((initialized_fields(value)))
+        << "factory initializes all payload fields";
+    ASSERT_TRUE((!ipc::valid_header(T{}))) << "default request lacks wire size";
 
     for (const uint32_t version : {0u, 3u, 4u, 6u, 0xffffffffu}) {
         value = ipc::request<T>();
         value.header.version = version;
-        test::check(!ipc::valid_header(value),
-                    "reject unsupported version with valid size");
+        ASSERT_TRUE((!ipc::valid_header(value)))
+            << "reject unsupported version with valid size";
     }
     for (const uint32_t size :
          {0u, static_cast<uint32_t>(sizeof(T) - 1),
           static_cast<uint32_t>(sizeof(T) + 1), 0xffffffffu}) {
         value = ipc::request<T>();
         value.header.size = size;
-        test::check(!ipc::valid_header(value),
-                    "reject invalid size with valid version");
+        ASSERT_TRUE((!ipc::valid_header(value)))
+            << "reject invalid size with valid version";
     }
     value.header.version = 0;
-    test::check(!ipc::valid_header(value),
-                "reject invalid version and size together");
+    ASSERT_TRUE((!ipc::valid_header(value)))
+        << "reject invalid version and size together";
     value = ipc::request<T>();
-    test::check(ipc::valid_header(value), "restored header is valid");
+    ASSERT_TRUE((ipc::valid_header(value))) << "restored header is valid";
 }
 
-void test_response_initialization() {
+TEST(ProtocolTest, ResponseValueInitialization) {
     const ipc::Header header{};
-    test::check(header.version == 5 && header.size == 0,
-                "header member defaults");
+    ASSERT_TRUE((header.version == 5 && header.size == 0))
+        << "header member defaults";
     const ipc::PingResponse ping{};
-    test::check(ping.magic == 0 && ping.status == 0,
-                "ping response member defaults");
+    ASSERT_TRUE((ping.magic == 0 && ping.status == 0))
+        << "ping response member defaults";
     const ipc::VersionInfo version{};
-    test::check(version.major == 0 && version.minor == 0 &&
-                    version.patch == 0 && version.reserved == 0,
-                "version value initialization");
+    ASSERT_TRUE((version.major == 0 && version.minor == 0 &&
+                 version.patch == 0 && version.reserved == 0))
+        << "version value initialization";
     const ipc::InstallResponse install{};
-    test::check(install.id == 0, "install response member defaults");
+    ASSERT_TRUE((install.id == 0)) << "install response member defaults";
     const ipc::QueryResponse query{};
-    test::check(query.version == 0 && query.running == 0 &&
-                    query.enabled == 0 && query.hooks == 0 &&
-                    query.hidden == 0 && query.abi == 0 &&
-                    query.backend_status == 0 && query.window_hooks == 0,
-                "query response member defaults");
+    ASSERT_TRUE((query.version == 0 && query.running == 0 &&
+                 query.enabled == 0 && query.hooks == 0 && query.hidden == 0 &&
+                 query.abi == 0 && query.backend_status == 0 &&
+                 query.window_hooks == 0))
+        << "query response member defaults";
 }
 
-void test_ioctls() {
+TEST(ProtocolTest, IoctlNumericAbiAndUniqueness) {
     for (std::size_t i = 0; i < ioctls.size(); ++i) {
         const auto code = ioctls[i];
-        test::check(code == 0x0022e000u + 4u * i,
-                    "IOCTL numeric ABI unchanged");
-        test::check((code & 3u) == 0, "IOCTL uses METHOD_BUFFERED");
-        test::check(((code >> 14) & 3u) == 3,
-                    "IOCTL requires both READ and WRITE");
-        test::check((code >> 16) == 0x22u, "IOCTL uses FILE_DEVICE_UNKNOWN");
-        test::check(((code >> 2) & 0xfffu) == 0x800u + i,
-                    "IOCTL function unchanged");
+        ASSERT_TRUE((code == 0x0022e000u + 4u * i))
+            << "IOCTL numeric ABI unchanged";
+        ASSERT_TRUE(((code & 3u) == 0)) << "IOCTL uses METHOD_BUFFERED";
+        ASSERT_TRUE((((code >> 14) & 3u) == 3))
+            << "IOCTL requires both READ and WRITE";
+        ASSERT_TRUE(((code >> 16) == 0x22u))
+            << "IOCTL uses FILE_DEVICE_UNKNOWN";
+        ASSERT_TRUE((((code >> 2) & 0xfffu) == 0x800u + i))
+            << "IOCTL function unchanged";
         for (std::size_t j = i + 1; j < ioctls.size(); ++j)
-            test::check(code != ioctls[j], "IOCTL values are pairwise unique");
+            ASSERT_TRUE((code != ioctls[j]))
+                << "IOCTL values are pairwise unique";
     }
 }
-}  // namespace
 
-int main() {
+TEST(ProtocolTest, PingRequestFactoryAndHeaderValidation) {
     test_request<ipc::PingRequest>();
-    test_request<ipc::EnableRequest>();
-    test_request<ipc::InstallRequest>();
-    test_request<ipc::HookRequest>();
-    test_request<ipc::HideRequest>();
-    test_request<ipc::ScrubRequest>();
-    test_request<ipc::WatchRequest>();
-    test_request<ipc::DumpRequest>();
-    test_response_initialization();
-    test_ioctls();
-    return test::finish();
 }
+
+TEST(ProtocolTest, EnableRequestFactoryAndHeaderValidation) {
+    test_request<ipc::EnableRequest>();
+}
+
+TEST(ProtocolTest, InstallRequestFactoryAndHeaderValidation) {
+    test_request<ipc::InstallRequest>();
+}
+
+TEST(ProtocolTest, HookRequestFactoryAndHeaderValidation) {
+    test_request<ipc::HookRequest>();
+}
+
+TEST(ProtocolTest, HideRequestFactoryAndHeaderValidation) {
+    test_request<ipc::HideRequest>();
+}
+
+TEST(ProtocolTest, ScrubRequestFactoryAndHeaderValidation) {
+    test_request<ipc::ScrubRequest>();
+}
+
+TEST(ProtocolTest, WatchRequestFactoryAndHeaderValidation) {
+    test_request<ipc::WatchRequest>();
+}
+
+TEST(ProtocolTest, DumpRequestFactoryAndHeaderValidation) {
+    test_request<ipc::DumpRequest>();
+}
+}  // namespace

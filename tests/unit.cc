@@ -1,4 +1,5 @@
-#include <cstdio>
+#include <gtest/gtest.h>
+
 #include <cstdlib>
 #include <string_view>
 
@@ -7,13 +8,8 @@
 #include "policy/names.hpp"
 using namespace blook;
 namespace {
-unsigned checks{};
 void check(bool condition, const char* message) {
-    ++checks;
-    if (!condition) {
-        std::fprintf(stderr, "FAIL: %s\n", message);
-        std::exit(1);
-    }
+    EXPECT_TRUE(condition) << message;
 }
 role classify(std::wstring_view name) {
     return blook::classify(name.data(), name.size());
@@ -23,15 +19,7 @@ role classify_ascii(std::string_view name) {
 }
 }  // namespace
 
-void test_ept_engine();
-void test_ept_jit_resync();
-void test_ept_watch();
-
-int main() {
-    test_ept_engine();
-    test_ept_jit_resync();
-    test_ept_watch();
-
+TEST(Policy, ImageClassification) {
     // The policy has to recognise the same images the previous implementation
     // did, and it must not depend on the path the sample was started from.
     check(classify(L"al-khaser_x64.exe") == role::target, "target by name");
@@ -61,14 +49,16 @@ int main() {
           "driver path matched");
     check(!blook::hidden_module(other_driver.data(), other_driver.size()),
           "unrelated driver kept");
+}
 
+TEST(Policy, JumpAndPatchBoundaries) {
     // The entry jump must not clobber an argument register and must not read
     // its target back out of the shadow page.
     uint8_t buffer[max_patch]{};
-    check(build_jump_patch(buffer,
-                           reinterpret_cast<uint64_t>(buffer) + 0x200000,
-                           reinterpret_cast<uint64_t>(buffer) + 0x200100),
-          "jump encoder produces a reachable patch");
+    check(
+        build_jump_patch(buffer, reinterpret_cast<uint64_t>(buffer) + 0x200000,
+                         reinterpret_cast<uint64_t>(buffer) + 0x200100),
+        "jump encoder produces a reachable patch");
     // The encoder is covered by the model test; the raw bytes change whenever
     // the entry-jump shape is revisited.
 
@@ -81,7 +71,9 @@ int main() {
             check(valid_patch(0x10000 + i, n) ==
                       (n >= 1 && n <= 64 && i + n <= 4096),
                   "exhaustive patch boundary");
+}
 
+TEST(Policy, OwnershipAndCompatibility) {
     // Ownership: a user hook only fires for its own address space, a kernel
     // hook fires everywhere, and an unknown identity never matches.
     hook_spec spec{};
@@ -122,7 +114,9 @@ int main() {
     page_b.pfn = 11;
     check(hooks_compatible(page_a, page_b),
           "different pages always compatible");
+}
 
+TEST(Policy, ViewPermissions) {
     auto original = select_view(ept_view::original_data, 123, 456);
     auto shadow = select_view(ept_view::shadow_execute, 123, 456);
     auto step = select_view(ept_view::original_step, 123, 456);
@@ -131,7 +125,9 @@ int main() {
     check(shadow.pfn == 456 && shadow.permissions == 4, "shadow execute only");
     check(step.pfn == 123 && step.permissions == 7, "MTF original step");
     check(window.pfn == 123 && window.permissions == 7, "call original window");
+}
 
+TEST(Policy, ProtocolContracts) {
     auto request = ipc::request<ipc::InstallRequest>();
     check(ipc::valid_header(request), "ABI size");
     request.header.version = ipc::abi_version - 1;
@@ -147,7 +143,4 @@ int main() {
           "buffered and RW access");
     check(ipc::IOCTL_BLOOK_HIDE != ipc::IOCTL_BLOOK_SCRUB,
           "distinct control codes");
-
-    std::printf("PASS: %u checks (policy/ABI, not hardware virtualization)\n",
-                checks);
 }
