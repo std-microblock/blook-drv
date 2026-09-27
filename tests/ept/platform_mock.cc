@@ -61,6 +61,11 @@ uint64_t translate_user(uint64_t cr3, uint64_t address) {
         return found->second ? found->second | (address & 0xfff) : 0;
     return cr3 == 1 ? 100ull << 12 : cr3 == 2 ? 200ull << 12 : 0;
 }
+uint64_t translate_guest(uint64_t cr3, uint64_t address) {
+    // Same table as translate_user; the production difference (user-bit
+    // requirement) does not exist in the mock.
+    return translate_user(cr3, address);
+}
 void copy_from_physical(void* destination, uint64_t physical, size_t size) {
     const auto& pages = ept_test::platform().physical_pages;
     const auto found = pages.find(physical & ~uint64_t{0xfff});

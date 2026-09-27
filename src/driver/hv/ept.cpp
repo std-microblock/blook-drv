@@ -702,6 +702,35 @@ void handle_page_access(vcpu_ept_data& ept, uint64_t physical, bool execute,
     for (size_t h = 0; h < hook_diag_slots; ++h)
         if (ept.hooks[h].active && ept.hooks[h].spec.pfn == pfn)
             ++g_hook_diag[h].data_hits;
+    // One instruction shape needs the fully accessible original instead of
+    // the plain data view: the accessing instruction itself lives on this
+    // page (a self-read, e.g. a RIP-relative load of the code's own
+    // immediate). original_data would fault the very next fetch of that
+    // instruction, and the shadow view would fault its data access again -
+    // the instruction never completes and the guest spins in a permanent
+    // exit ping-pong (the observed same-page self-read hang). Run exactly one
+    // instruction from the untouched page with read/write/execute; the MTF
+    // exit re-arms, exactly like the execute-side original_step path.
+    if (guest_rip != ~0ull) {
+        const auto rip_physical =
+            platform::translate_guest(platform::guest_cr3(), guest_rip);
+        if (rip_physical && (rip_physical >> 12) == pfn &&
+            ept.temporary_count < blook::max_hooks) {
+            ++g_stats.original_step;
+            map(*pte,
+                blook::select_view(blook::ept_view::original_step, pfn, 0));
+            bool known = false;
+            for (size_t i = 0; i < ept.temporary_count; ++i)
+                if (ept.temporary[i] == pte)
+                    known = true;
+            if (!known) {
+                ept.temporary[ept.temporary_count++] = pte;
+                platform::single_step(true);
+            }
+            invalidate();
+            return;
+        }
+    }
     map(*pte, blook::select_view(blook::ept_view::original_data, pfn, 0));
     invalidate();
 }

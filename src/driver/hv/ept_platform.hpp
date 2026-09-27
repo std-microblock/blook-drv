@@ -15,6 +15,9 @@ void invalidate();
 void single_step(bool);
 uint64_t guest_cr3();
 uint64_t translate_user(uint64_t, uint64_t);
+// Present-bit-only walk: also resolves kernel addresses, which the self-read
+// detection needs (a hooked kernel function's RIP has no user bit).
+uint64_t translate_guest(uint64_t, uint64_t);
 // Mocked per test: copies out of a registered "physical page" table.
 void copy_from_physical(void* dst, uint64_t physical, size_t size);
 }  // namespace hv::platform
@@ -49,6 +52,11 @@ inline uint64_t guest_cr3() {
 }
 inline uint64_t translate_user(uint64_t cr3, uint64_t address) {
     return hv::translate_user(cr3, address);
+}
+// Present-bit-only walk: also resolves kernel addresses, which the self-read
+// detection needs (a hooked kernel function's RIP has no user bit).
+inline uint64_t translate_guest(uint64_t cr3, uint64_t address) {
+    return hv::translate_guest(cr3, address);
 }
 // Root-mode read of arbitrary guest memory: the host maps all physical memory
 // at host_physical_memory_base. The destination page is ours and the source

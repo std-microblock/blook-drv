@@ -38,6 +38,39 @@ TEST_F(EptTest, ExecuteAndDataAccessSelectStableSeparateViews) {
     EXPECT_EQ(pte->flags & 7, 3u);
 }
 
+TEST_F(EptTest, SamePageDataAccessSingleStepsOriginalInsteadOfPingPong) {
+    const auto a = Hook();
+    ASSERT_TRUE(install_ept_hook(*cpu, a));
+    auto* pte = get_ept_pte(*cpu, a.pfn << 12);
+    ASSERT_NE(pte, nullptr);
+    // The data access comes from an instruction that lives on the hooked page
+    // itself (a RIP-relative self-read): the plain data view would fault the
+    // fetch of that instruction and the shadow view would fault the data
+    // access, so the instruction would never complete (the observed live
+    // hang). It must get one single-stepped original instruction instead.
+    platform().MapUser(platform().current_cr3, a.target, a.pfn << 12);
+    handle_page_access(*cpu, a.pfn << 12, false, a.target);
+    EXPECT_EQ(pte->page_frame_number, a.pfn);
+    EXPECT_EQ(pte->flags & 7, 7u);
+    EXPECT_TRUE(platform().mtf);
+    rearm_ept(*cpu);
+    EXPECT_FALSE(platform().mtf);
+    EXPECT_EQ(pte->flags & 7, 3u);
+}
+
+TEST_F(EptTest, CrossPageDataAccessKeepsPlainDataView) {
+    const auto a = Hook();
+    ASSERT_TRUE(install_ept_hook(*cpu, a));
+    auto* pte = get_ept_pte(*cpu, a.pfn << 12);
+    ASSERT_NE(pte, nullptr);
+    // The accessing instruction lives on an unrelated page: the plain data
+    // view completes the access, no single-step is needed.
+    handle_page_access(*cpu, a.pfn << 12, false, 0x700000);
+    EXPECT_EQ(pte->page_frame_number, a.pfn);
+    EXPECT_EQ(pte->flags & 7, 3u);
+    EXPECT_FALSE(platform().mtf);
+}
+
 TEST_F(EptTest, UnknownAddressSpaceExecutesOriginalAfterContextReset) {
     const auto a = Hook();
     ASSERT_TRUE(install_ept_hook(*cpu, a));
