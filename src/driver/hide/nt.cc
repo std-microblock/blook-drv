@@ -10,6 +10,7 @@
 #include "driver/hide/peb.hpp"
 #include "driver/hide/roles.hpp"
 #include "policy/hook.hpp"
+#include "ssdt/ssdt.hpp"
 
 namespace blook::hide::nt {
 namespace {
@@ -764,9 +765,11 @@ NTSTATUS install_table(install_entry* table, uint32_t entry_count,
         }
         UNICODE_STRING symbol;
         RtlInitUnicodeString(&symbol, entry.symbol);
-        auto* address = MmGetSystemRoutineAddress(&symbol);
-        // A service that is not exported on this build is skipped rather than
-        // guessed at.
+        // Current builds no longer export every service (24H2 has no
+        // NtProtectVirtualMemory / NtWriteVirtualMemory), so resolution falls
+        // back to the SSDT; a service that cannot be resolved at all is
+        // skipped rather than guessed at.
+        auto* address = ssdt::resolve_service(entry.symbol);
         if (!address) {
             blook::bringup_write("install: name unresolved, index", index,
                                  true);
