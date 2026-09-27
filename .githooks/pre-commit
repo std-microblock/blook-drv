@@ -1,0 +1,202 @@
+#!/bin/sh
+# Pre-commit gate: clang-format every C++ file staged for this commit.
+#
+# The formatted text is written back into the index, so the commit always
+# carries formatted code. The working tree is rewritten only when it already
+# matched the staged blob; a partly staged file (`git add -p`) is therefore
+# never silently overwritten - only its index entry is reformatted, and the
+# file is reported.
+#
+# Scope: staged .c/.cc/.cpp/.h/.hpp/.inl outside third_party/, build/, .cache/,
+# .xmake/ and packages/. Vendored and generated trees are not ours to reflow.
+#
+# Escape hatches:
+#   git commit --no-verify            bypass every hook for this commit
+#   BLOOK_SKIP_FORMAT=1 git commit    bypass this hook only
+#   CLANG_FORMAT=<path> git commit    use a different clang-format binary
+#
+# Enable it once per clone - core.hooksPath lives in .git/config, which is not
+# cloned: git config core.hooksPath .githooks
+
+set -u
+
+if [ "${BLOOK_SKIP_FORMAT:-0}" = "1" ]; then
+    echo "pre-commit: BLOOK_SKIP_FORMAT=1, skipping clang-format" >&2
+    exit 0
+fi
+
+root=$(git rev-parse --show-toplevel) || exit 1
+cd "$root" || exit 1
+
+style_config=".clang-format"
+if [ ! -f "$style_config" ]; then
+    echo "pre-commit: $style_config is missing; refusing to fall back to a default style" >&2
+    exit 1
+fi
+
+# clang-format.exe is a native Windows binary: it cannot resolve MSYS paths such
+# as /d/blook-drv/src/main.cc, so hand it a Windows path when cygpath exists.
+to_native() {
+    if command -v cygpath >/dev/null 2>&1; then
+        cygpath -w -- "$1"
+    else
+        printf '%s\n' "$1"
+    fi
+}
+
+find_clang_format() {
+    if [ -n "${CLANG_FORMAT:-}" ]; then
+        if [ -x "$CLANG_FORMAT" ] || command -v "$CLANG_FORMAT" >/dev/null 2>&1; then
+            printf '%s\n' "$CLANG_FORMAT"
+            return 0
+        fi
+        echo "pre-commit: CLANG_FORMAT=$CLANG_FORMAT is not an executable file" >&2
+        return 1
+    fi
+    if command -v clang-format >/dev/null 2>&1; then
+        command -v clang-format
+        return 0
+    fi
+    for candidate in \
+        "/c/Program Files/LLVM/bin/clang-format.exe" \
+        "/c/Program Files (x86)/LLVM/bin/clang-format.exe" \
+        "/c/Program Files/Microsoft Visual Studio"/*/*/VC/Tools/Llvm/x64/bin/clang-format.exe \
+        "/c/Program Files (x86)/Microsoft Visual Studio"/*/*/VC/Tools/Llvm/x64/bin/clang-format.exe \
+        "$HOME/scoop/apps/llvm/current/bin/clang-format.exe" \
+        /usr/bin/clang-format \
+        /usr/local/bin/clang-format; do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+clang_format=$(find_clang_format) || {
+    echo "pre-commit: clang-format was not found." >&2
+    echo "  Install LLVM, or point CLANG_FORMAT at the binary, then commit again." >&2
+    echo "  'git commit --no-verify' bypasses this check." >&2
+    exit 1
+}
+
+# Pinning the config path keeps the style independent of where clang-format
+# resolves --assume-filename from.
+style_arg="file:$(to_native "$root/$style_config")"
+
+list=$(mktemp) || exit 1
+blob=$(mktemp) || exit 1
+trap 'rm -f "$list" "$blob"' EXIT HUP INT TERM
+
+git -c core.quotepath=false diff --cached --name-only --diff-filter=ACMR -z -- |
+    tr '\0' '\n' >"$list" || exit 1
+
+empty_blob=$(git hash-object -t blob --stdin </dev/null)
+reformatted=""
+index_only=""
+count=0
+failed=0
+
+while IFS= read -r path; do
+    case "$path" in
+        "" | third_party/* | build/* | .cache/* | .xmake/* | packages/*) continue ;;
+    esac
+    case "$path" in
+        *.c | *.cc | *.cpp | *.h | *.hpp | *.inl) ;;
+        *) continue ;;
+    esac
+
+    entry=$(git ls-files -s -- "$path")
+    if [ -z "$entry" ]; then
+        continue
+    fi
+    mode=${entry%% *}
+    rest=${entry#* }
+    old=${rest%% *}
+    native_path=$(to_native "$root/$path")
+
+    if [ "$old" = "$empty_blob" ] && [ -f "$path" ]; then
+        # `git add -N`: only the path is recorded, so there is nothing to keep in
+        # sync - format the file and let git add store it with its own filters.
+        if ! "$clang_format" --style="$style_arg" --assume-filename="$native_path" -i "$path"; then
+            echo "pre-commit: clang-format failed on $path" >&2
+            failed=1
+            continue
+        fi
+        if git diff --quiet -- "$path"; then
+            continue
+        fi
+        if ! git add -- "$path"; then
+            echo "pre-commit: cannot stage $path" >&2
+            failed=1
+            continue
+        fi
+        count=$((count + 1))
+        reformatted="$reformatted  $path
+"
+        continue
+    fi
+
+    if ! git cat-file blob ":$path" >"$blob"; then
+        echo "pre-commit: cannot read the staged copy of $path" >&2
+        failed=1
+        continue
+    fi
+    if ! "$clang_format" --style="$style_arg" --assume-filename="$native_path" -i "$(to_native "$blob")"; then
+        echo "pre-commit: clang-format failed on $path" >&2
+        failed=1
+        continue
+    fi
+    # The blob read back from the index is stored verbatim: --no-filters keeps
+    # the line endings the index already had instead of normalising them (and
+    # keeps core.autocrlf from warning about a temporary file).
+    new=$(git hash-object -w --no-filters -- "$blob")
+    if [ "$new" = "$old" ]; then
+        continue
+    fi
+
+    # Ask before touching the index: does the working copy still match what was
+    # staged? If not, the user has unstaged edits in that file.
+    worktree_clean=1
+    if ! git diff --quiet -- "$path"; then
+        worktree_clean=0
+    fi
+
+    if ! git update-index --add --cacheinfo "$mode,$new,$path"; then
+        echo "pre-commit: cannot update the index entry for $path" >&2
+        failed=1
+        continue
+    fi
+
+    if [ "$worktree_clean" = "1" ]; then
+        if ! "$clang_format" --style="$style_arg" --assume-filename="$native_path" -i "$path"; then
+            echo "pre-commit: clang-format failed on the working copy of $path" >&2
+            failed=1
+            continue
+        fi
+        reformatted="$reformatted  $path
+"
+    else
+        index_only="$index_only  $path
+"
+    fi
+
+    count=$((count + 1))
+done <"$list"
+
+if [ "$failed" != "0" ]; then
+    echo "pre-commit: clang-format failed; nothing was committed." >&2
+    exit 1
+fi
+
+if [ "$count" -gt 0 ]; then
+    echo "pre-commit: clang-format rewrote $count file(s) and updated the index:"
+    printf '%s' "$reformatted"
+    if [ -n "$index_only" ]; then
+        echo "pre-commit: these files also carry unstaged edits, so only their staged content was formatted:"
+        printf '%s' "$index_only"
+    fi
+    echo "pre-commit: review 'git diff --cached' - the commit proceeds with the formatted content."
+fi
+
+exit 0

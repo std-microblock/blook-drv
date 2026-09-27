@@ -17,7 +17,7 @@
   - Windows Driver Kit（WDK，提供内核头文件、驱动库与链接配置，使用 `win10_vb` 环境定义）。
   - Microsoft Macro Assembler（MASM，即 `ml64.exe`，负责编译 VMX 与 VM-exit 汇编模块）。
 - **构建系统**：xmake。
-- **签名工具**：签名套件位于仓库 [signer/](<../signer>) 目录，包含驱动测试签名程序 [CSignTool.exe](<../signer/CSignTool.exe>) 与规则文件 [hook.ini](<../signer/hook.ini>)。
+- **签名工具**：签名套件位于仓库 [signer/](<../signer>) 目录，其中 [spcsign.exe](<../signer/spcsign/spcsign.exe>) 为随仓库分发的本地 Authenticode PKCS#7 签名程序（源码独立开源于外部仓库，仓库内只保存已编译产物），SPC 模板与本地时间戳机构分别位于 `signer/spc-templates` 与 `signer/tsa`。
 
 ### 构建目标列表
 
@@ -83,7 +83,7 @@ xmake build -a
 
 1. **配置与编译**：调用 `xmake f` 与 `xmake build -a` 编译工程内全部目标。
 2. **宿主机测试**：依次执行 `blook-tests`、`blook-protocol-tests`、`blook-client-tests` 与 `blook-loader-tests` 四组测试。
-3. **数字签名与验签**：调用 [CSignTool.exe](<../signer/CSignTool.exe>) 对驱动程序实施测试签名，并调用系统的 `signtool.exe verify /kp` 校验签名有效性。
+3. **数字签名与验签**：调用仓库内预编译的 [spcsign.exe](<../signer/spcsign/spcsign.exe>) 对驱动程序实施测试签名（无需现场编译，仅要求系统已安装 .NET 10 运行时），并调用系统的 `signtool.exe verify /kp` 校验签名有效性。
 4. **服务部署（可选）**：根据输入参数向系统服务控制管理器（SCM）注册或启动驱动服务。
 
 脚本运行参数如下：
@@ -114,9 +114,11 @@ xmake build -a
 
 基准测试结果追加记录至 `.cache/bench.log` 文件中。
 
-### 源码格式化脚本 Reformat.ps1
+### 源码格式化与 pre-commit 钩子
 
-代码格式化通过 [Reformat.ps1](<../scripts/Reformat.ps1>) 维护：
+代码格式由仓库根目录的 [.clang-format](<../.clang-format>) 规则统一约束，格式化工具为 `clang-format`（本仓库以 LLVM 20.1.0 验证）。该程序需位于 `PATH`，或通过 `CLANG_FORMAT` 环境变量指定可执行文件路径。
+
+全量格式化与格式检查通过 [Reformat.ps1](<../scripts/Reformat.ps1>) 执行：
 
 ```powershell
 # 原地格式化源码
@@ -126,7 +128,27 @@ xmake build -a
 .\scripts\Reformat.ps1 -Check
 ```
 
-脚本根据仓库根目录下的 [.clang-format](<../.clang-format>) 规则遍历 `src/` 与 `tests/` 目录下的所有 C++ 源码与头文件。
+脚本根据 [.clang-format](<../.clang-format>) 规则遍历 `src/` 与 `tests/` 目录下的所有 C/C++ 源码、头文件与 `.inl` 内联片段。
+
+[.clang-format](<../.clang-format>) 显式关闭 `SortIncludes`：Windows SDK 与 WDK 头文件存在顺序依赖（例如 `<windows.h>` 必须先于 `<bcrypt.h>`），字母序重排会导致编译失败，因此 include 顺序由人工维护，格式化过程不重排。
+
+[pre-commit](<../.githooks/pre-commit>) 钩子在每次提交时格式化本次暂存的 C/C++ 文件并将结果写回暂存区，因此提交内容始终保持格式合规，无需手工运行全量脚本。钩子路径记录在 `.git/config` 中、不随克隆分发，克隆后执行一次：
+
+```powershell
+git config core.hooksPath .githooks    # 启用钩子
+git config --unset core.hooksPath      # 关闭，恢复使用默认的 .git/hooks
+```
+
+钩子行为如下：
+
+| 项目 | 行为 |
+| --- | --- |
+| 覆盖范围 | 本次提交中暂存的 `.c`、`.cc`、`.cpp`、`.h`、`.hpp`、`.inl` 文件；`third_party/`、`build/`、`.cache/`、`.xmake/` 与 `packages/` 目录不参与重排 |
+| 工作区同步 | 文件的工作区内容与暂存内容一致时，同步重写工作区文件；文件存在未暂存改动时仅重写暂存内容（`git add -p` 的部分暂存不会被覆盖），并在输出中列出该文件 |
+| 工具缺失 | 无法定位 `clang-format` 时拒绝提交，并输出安装与绕过提示 |
+| 跳过方式 | `git commit --no-verify` 跳过全部钩子；`BLOOK_SKIP_FORMAT=1 git commit` 仅跳过格式化 |
+
+钩子只处理本次提交涉及的文件，因此在钩子启用前已存在的不合规历史文件仍由 `Reformat.ps1` 负责全量重排。
 
 ## 测试分层体系
 
